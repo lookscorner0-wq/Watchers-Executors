@@ -72,7 +72,7 @@ def get_linkedin_data(url):
         "profile_url": data.get("jobPostingUrl", url),
         "website_url": data.get("applyMethod", {}).get(
             "com.linkedin.voyager.jobs.ComplexOnsiteApply", {}
-        ).get("easyApplyUrl", ")
+        ).get("easyApplyUrl", "")
         }
             return {
                 "description": data.get("description", {}).get("text", "")[:300],
