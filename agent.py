@@ -59,10 +59,15 @@ def get_linkedin_data(url):
         time.sleep(random.uniform(2, 4))
 
         if "/jobs/" in url:
-            job_id = url.split("/jobs/view/")[-1].split("/")[0].split("?")[0]
-            print(f"Job ID: {job_id}")
-            data = api.get_job(job_id)
-            print(f"Raw: {data}")
+    # ✅ sirf numbers nikalo
+    import re
+    job_id = re.search(r'(\d+)', url.split("/jobs/")[-1])
+    if not job_id:
+        return None
+    job_id = job_id.group(1)
+    print(f"Job ID: {job_id}")
+    data = api.get_job(job_id)
+    print(f"Raw: {data}")
             return {
                 "description": data.get("description", {}).get("text", "")[:300],
                 "location":    data.get("formattedLocation", ""),
