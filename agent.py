@@ -41,17 +41,26 @@ def get_session():
     return s
 
 def search_jobs(query, s):
-    res = s.get("https://www.linkedin.com/voyager/api/jobs/search", params={"keywords": query, "start": 0, "count": 5})
+    res = s.get(
+        "https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards",
+        params={
+            "decorationId": "com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollection-174",
+            "count": 5,
+            "q": "jobSearch",
+            "query": f"(keywords:{query},locationUnion:(geoId:92000000),origin:JOB_SEARCH_PAGE_SEARCH_BUTTON)"
+        }
+    )
     print(f"Status: {res.status_code} | Length: {len(res.text)}")
-    if not res.text.strip():
-        print("Empty response!")
+    if not res.text.strip() or res.status_code != 200:
+        print(f"Response: {res.text[:200]}")
         return []
     try:
         data = res.json()
-        print(f"Elements: {len(data.get('elements', []))}")
-        return data.get("elements", [])
+        elements = data.get("elements", [])
+        print(f"Elements: {len(elements)}")
+        return elements
     except Exception as e:
-        print(f"Search error: {e} | Response: {res.text[:200]}")
+        print(f"Error: {e}")
         return []
 
 def get_job_data(job_id, s):
