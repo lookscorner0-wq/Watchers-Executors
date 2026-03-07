@@ -36,14 +36,11 @@ def serp_search(query):
 
 def get_linkedin_data(url):
     try:
-         api = Linkedin(
-    LI_EMAIL,
-    LI_PASSWORD,
-    cookies={
-        "li_at": LI_AT,
-        "JSESSIONID": LI_JSESSIONID
-    }
-)
+        api = Linkedin(
+            LI_EMAIL,
+            LI_PASSWORD,
+            cookies={"li_at": LI_AT, "JSESSIONID": LI_JSESSIONID}
+        )
         time.sleep(random.uniform(2, 4))
 
         if "/posts/" in url:
