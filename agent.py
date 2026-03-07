@@ -11,6 +11,7 @@ OPENAI_KEY   = os.environ["OPENAI_KEY"]
 LI_AT        = os.environ["LI_AT"]
 LI_EMAIL     = os.environ["LI_EMAIL"]
 LI_PASSWORD  = os.environ["LI_PASSWORD"]
+LI_JSESSIONID = os.environ["LI_JSESSIONID"]
 SHEET_URL    = "https://script.google.com/macros/s/AKfycbzSmrlXx32EM3bcEo6HhW-pdKpPgQyAwORm10hhFnE1mwVMqH37dZphG_HaWrL-55kM/exec"
 SEEN_FILE    = "seen_urls.json"
 
