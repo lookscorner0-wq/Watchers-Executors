@@ -11,7 +11,7 @@ LI_AT         = os.environ["LI_AT"]
 LI_EMAIL      = os.environ["LI_EMAIL"]
 LI_PASSWORD   = os.environ["LI_PASSWORD"]
 LI_JSESSIONID = os.environ["LI_JSESSIONID"]
-SHEET_URL     = "https://script.google.com/macros/s/AKfycbwQnK31fgJHHWiwkRMK8kCShNuzYFAWJq4vcwfbDvYAEZBbdoa1HO7-TpoGXiBw7qgx/exec"
+SHEET_URL     = "https://script.google.com/macros/s/AKfycbyC9kD6TNqrnSoFWeelHfF1kVkZxufVjOPfysicYaGYAQaqmuoFMSOyOUw--4XfPO5t/exec"
 SEEN_FILE     = "seen_urls.json"
 
 def load_seen():
