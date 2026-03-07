@@ -26,7 +26,7 @@ def save_seen(seen):
 
 def serp_search(query):
     res = requests.get("https://serpapi.com/search", params={
-        "q": f"site:linkedin.com {query}",
+        "q": f"site:linkedin.com/jobs {query}",
         "api_key": SERPAPI_KEY,
         "num": 5
     })
@@ -36,11 +36,14 @@ def serp_search(query):
 
 def get_linkedin_data(url):
     try:
-        api = Linkedin(
-            LI_EMAIL,
-            LI_PASSWORD,
-            cookies={"li_at": LI_AT, "JSESSIONID": f'"{LI_JSESSIONID}"'}
-        )
+         api = Linkedin(
+    LI_EMAIL,
+    LI_PASSWORD,
+    cookies={
+        "li_at": LI_AT,
+        "JSESSIONID": LI_JSESSIONID
+    }
+)
         time.sleep(random.uniform(2, 4))
 
         if "/posts/" in url:
