@@ -5,11 +5,16 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v4
         with:
           python-version: "3.10"
@@ -28,3 +33,4 @@ jobs:
           git add seen_urls.json
           git diff --staged --quiet || git commit -m "update seen urls"
           git push
+
