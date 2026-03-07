@@ -113,7 +113,7 @@ for rank, r in enumerate(results, 1):
             "timestamp":   time.strftime("%Y-%m-%d %H:%M"),
             "title":       title,
             "description": li_data.get("description", r.get("snippet", "")),
-            "location":    extract_location(title, r.get("snippet", ""))),
+            "location":    extract_location(title, r.get("snippet", "")),
             "lead_score":  lead_score,
             "job_date":    str(li_data.get("post_date", "")),
             "query":       "ai automation expert",
