@@ -65,15 +65,15 @@ def get_linkedin_data(url):
              job_id = job_id.group(1)
              res  = session.get(f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}")
              data = res.json()
-    return {
-        "description": data.get("description", {}).get("text", "")[:300],
-        "location":    data.get("formattedLocation", ""),
-        "post_date":   str(data.get("listedAt", "")),
-        "profile_url": data.get("jobPostingUrl", url),
-        "website_url": data.get("applyMethod", {}).get(
-            "com.linkedin.voyager.jobs.ComplexOnsiteApply", {}
-        ).get("easyApplyUrl", "")
-    }
+             return {
+                  "description": data.get("description", {}).get("text", "")[:300],
+                  "location":    data.get("formattedLocation", ""),
+                  "post_date":   str(data.get("listedAt", "")),
+                  "profile_url": data.get("jobPostingUrl", url),
+                  "website_url": data.get("applyMethod", {}).get(
+                  "com.linkedin.voyager.jobs.ComplexOnsiteApply", {}
+                  ).get("easyApplyUrl", "")
+             }
             return {
                 "description": data.get("description", {}).get("text", "")[:300],
                 "location":    data.get("formattedLocation", ""),
