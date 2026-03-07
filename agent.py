@@ -90,10 +90,11 @@ def is_relevant(title, description, query):
             headers={"Authorization": f"Bearer {OPENAI_KEY}"},
             json={
                 "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": f"Is this job relevant to '{query}'?\nTitle: {title}\nDescription: {description[:200]}\nReply ONLY YES or NO."}]
+                "messages": [{"role": "user", "content": f"Is this job even slightly related to '{query}' OR any digital/tech/marketing/automation work?\nTitle: {title}\nDescription: {description[:200]}\nReply ONLY YES or NO."}]
             }
         )
         answer = res.json()["choices"][0]["message"]["content"].strip().upper()
+        print(f"AI check '{title[:30]}': {answer}")
         return "YES" in answer
     except:
         return True
