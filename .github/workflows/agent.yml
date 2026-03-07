@@ -26,6 +26,7 @@ jobs:
           LI_AT:        ${{ secrets.LI_AT }}
           LI_EMAIL:     ${{ secrets.LI_EMAIL }}
           LI_PASSWORD:  ${{ secrets.LI_PASSWORD }}
+          LI_JSESSIONID:${{ secrets.LI_JSESSIONID }}
       - name: Save seen urls
         run: |
           git config user.name "bot"
