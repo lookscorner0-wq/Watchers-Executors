@@ -59,10 +59,10 @@ def get_linkedin_data(url):
         time.sleep(random.uniform(2, 4))
 
         if "/jobs/" in url:
-    job_id = url.split("/jobs/view/")[-1].split("/")[0].split("?")[0]
-    print(f"Job ID: {job_id}")  # debug
-    data = api.get_job(job_id)
-    print(f"Raw response: {data}")  # debug
+            job_id = url.split("/jobs/view/")[-1].split("/")[0].split("?")[0]
+            print(f"Job ID: {job_id}")
+            data = api.get_job(job_id)
+            print(f"Raw: {data}")
             return {
                 "description": data.get("description", {}).get("text", "")[:300],
                 "location":    data.get("formattedLocation", ""),
@@ -77,7 +77,8 @@ def get_linkedin_data(url):
 
         if "/posts/" in url:
             post_id = url.split("/posts/")[-1].split("/")[0].split("?")[0]
-            data    = api.get_post_comments(post_id, comment_count=0)
+            data = api.get_post_comments(post_id, comment_count=0)
+            print(f"Raw: {data}")
             return {
                 "description": data.get("commentary", {}).get("text", {}).get("text", ""),
                 "location":    data.get("actor", {}).get("subDescription", {}).get("text", ""),
