@@ -36,17 +36,30 @@ def serp_search(query):
 
 def get_linkedin_data(url):
     try:
-        api = Linkedin(
-            LI_EMAIL,
-            LI_PASSWORD,
-            cookies={"li_at": LI_AT, "JSESSIONID": LI_JSESSIONID}
-        )
+        api = Linkedin(LI_EMAIL, LI_PASSWORD)
+        api.client.session.cookies.set("li_at", LI_AT)
+        api.client.session.cookies.set("JSESSIONID", LI_JSESSIONID)
         time.sleep(random.uniform(2, 4))
+
+        if "/jobs/" in url:
+            job_id = url.split("/jobs/view/")[-1].split("/")[0].split("?")[0]
+            data   = api.get_job(job_id)
+            print(f"Job data: {data}")
+            return {
+                "description": data.get("description", {}).get("text", "")[:300],
+                "location":    data.get("formattedLocation", ""),
+                "post_date":   data.get("listedAt", ""),
+                "profile_url": data.get("companyDetails", {}).get(
+                    "com.linkedin.voyager.deco.jobs.web.shared.WebCompactJobPostingCompany", {}
+                ).get("companyResolutionResult", {}).get("url", ""),
+                "website_url": data.get("applyMethod", {}).get(
+                    "com.linkedin.voyager.jobs.OffsiteApply", {}
+                ).get("companyApplyUrl", "")
+            }
 
         if "/posts/" in url:
             post_id = url.split("/posts/")[-1].split("/")[0].split("?")[0]
             data    = api.get_post_comments(post_id, comment_count=0)
-            print(f"Post data: {data}")
             return {
                 "description": data.get("commentary", {}).get("text", {}).get("text", ""),
                 "location":    data.get("actor", {}).get("subDescription", {}).get("text", ""),
@@ -55,17 +68,6 @@ def get_linkedin_data(url):
                 "website_url": ""
             }
 
-        if "/jobs/" in url:
-            job_id = url.split("/jobs/")[-1].split("/")[0].split("?")[0]
-            data   = api.get_job(job_id)
-            print(f"Job data: {data}")
-            return {
-                "description": data.get("description", {}).get("text", "")[:300],
-                "location":    data.get("formattedLocation", ""),
-                "post_date":   data.get("listedAt", ""),
-                "profile_url": url,
-                "website_url": data.get("applyMethod", {}).get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
-            }
     except Exception as e:
         print(f"LinkedIn error: {e}")
         return None
