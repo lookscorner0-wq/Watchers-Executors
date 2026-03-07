@@ -59,9 +59,10 @@ def get_linkedin_data(url):
         time.sleep(random.uniform(2, 4))
 
         if "/jobs/" in url:
-            job_id = url.split("/jobs/view/")[-1].split("/")[0].split("?")[0]
-            data   = api.get_job(job_id)
-            print(f"Job data: {data}")
+    job_id = url.split("/jobs/view/")[-1].split("/")[0].split("?")[0]
+    print(f"Job ID: {job_id}")  # debug
+    data = api.get_job(job_id)
+    print(f"Raw response: {data}")  # debug
             return {
                 "description": data.get("description", {}).get("text", "")[:300],
                 "location":    data.get("formattedLocation", ""),
