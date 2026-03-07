@@ -45,7 +45,12 @@ def get_queries():
             ]
         }
     )
-    text = res.json()["choices"][0]["message"]["content"].strip()
+    data = res.json()
+    print(f"OpenAI response: {data}")  # debug
+    if "choices" not in data:
+        print(f"OpenAI error: {data.get('error', 'unknown')}")
+        return QUERIES
+    text = data["choices"][0]["message"]["content"].strip()
     text = text.replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(text)
