@@ -83,7 +83,10 @@ def is_relevant(title, snippet, query):
 
 def get_linkedin_data(url):
     try:
-        api = Linkedin(LI_EMAIL, LI_PASSWORD, cookies={"li_at": LI_AT})
+        api = Linkedin(LI_EMAIL, LI_PASSWORD, cookies={
+            "li_at": LI_AT,
+            "JSESSIONID": "LI_JSESSIONID"
+        })
         time.sleep(random.uniform(3, 6))
 
         if "/posts/" in url:
