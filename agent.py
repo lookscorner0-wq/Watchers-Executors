@@ -2,8 +2,22 @@ import os
 import json
 import time
 import random
+import re 
 import requests
 from linkedin_api import Linkedin
+
+def extract_location(title, snippet):
+    # Remote check
+    if "remote" in title.lower() or "remote" in snippet.lower():
+        return "Remote"
+    # Location pattern like "New York, NY" or "London, UK"
+    match = re.search(r'([A-Z][a-z]+,\s*[A-Z]{2})', title + " " + snippet)
+    if match:
+        return match.group(1)
+    return ""
+
+def clean_title(title):
+    return re.sub(r'\s*[\(\[].*?[\)\]]', '', title).strip()
 
 SERPAPI_KEY   = os.environ["SERPAPI_KEY"]
 OPENAI_KEY    = os.environ["OPENAI_KEY"]
@@ -99,7 +113,7 @@ for rank, r in enumerate(results, 1):
             "timestamp":   time.strftime("%Y-%m-%d %H:%M"),
             "title":       title,
             "description": li_data.get("description", r.get("snippet", "")),
-            "location":    li_data.get("location", ""),
+            "location":    extract_location(title, r.get("snippet", ""))),
             "lead_score":  lead_score,
             "job_date":    str(li_data.get("post_date", "")),
             "query":       "ai automation expert",
