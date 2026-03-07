@@ -1,0 +1,30 @@
+name: LinkedIn Watcher
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+      - run: pip install requests linkedin-api
+      - run: python agent.py
+        env:
+          SERPAPI_KEY:  ${{ secrets.SERPAPI_KEY }}
+          OPENAI_KEY:   ${{ secrets.OPENAI_KEY }}
+          LI_AT:        ${{ secrets.LI_AT }}
+          LI_EMAIL:     ${{ secrets.LI_EMAIL }}
+          LI_PASSWORD:  ${{ secrets.LI_PASSWORD }}
+      - name: Save seen urls
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@bot.com"
+          git add seen_urls.json
+          git diff --staged --quiet || git commit -m "update seen urls"
+          git push
