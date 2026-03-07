@@ -41,10 +41,18 @@ def get_session():
     return s
 
 def search_jobs(query, s):
-    res  = s.get("https://www.linkedin.com/voyager/api/jobs/search", params={"keywords": query, "start": 0, "count": 5})
-    data = res.json()
-    print(f"LinkedIn search '{query}': {res.status_code}")
-    return data.get("elements", [])
+    res = s.get("https://www.linkedin.com/voyager/api/jobs/search", params={"keywords": query, "start": 0, "count": 5})
+    print(f"Status: {res.status_code} | Length: {len(res.text)}")
+    if not res.text.strip():
+        print("Empty response!")
+        return []
+    try:
+        data = res.json()
+        print(f"Elements: {len(data.get('elements', []))}")
+        return data.get("elements", [])
+    except Exception as e:
+        print(f"Search error: {e} | Response: {res.text[:200]}")
+        return []
 
 def get_job_data(job_id, s):
     res  = s.get(f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}")
