@@ -45,9 +45,9 @@ def get_session():
 
 def search_jobs(query, s):
     try:
-        kw    = query.replace(" ", "%20")
-        url   = f"https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88&count=5&q=jobSearch&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)&servedEventEnabled=false&start=0"
-        res   = s.get(url)
+        kw  = query.replace(" ", "%20")
+        url = f"https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88&count=5&q=jobSearch&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)&servedEventEnabled=false&start=0"
+        res = s.get(url)
         print(f"Search '{query}': {res.status_code}")
         data  = res.json()
         cards = data.get("data", {}).get("metadata", {}).get("jobCardPrefetchQueries", [])
@@ -57,7 +57,7 @@ def search_jobs(query, s):
                 match = re.search(r'\((\d+),', key)
                 if match:
                     ids.append(match.group(1))
-        print(f"Job IDs found: {ids}")
+        print(f"Job IDs: {ids}")
         return ids
     except Exception as e:
         print(f"Search error: {e}")
@@ -66,27 +66,26 @@ def search_jobs(query, s):
 def get_job_data(job_id, s):
     try:
         time.sleep(random.uniform(2, 4))
-        res  = s.get(
-            f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}",
-            headers={"accept": "application/vnd.linkedin.normalized+json+2.1"}
-        )
-        print(f"Job {job_id} status: {res.status_code} | size: {len(res.text)}")
+        res  = s.get(f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}")
         if res.status_code != 200 or not res.text.strip():
             return None
         data = res.json()
-        print(f"Title: {data.get('title', 'NOT FOUND')}")
+        # date
         date = data.get("listedAt", "")
         if date:
-            date = datetime.fromtimestamp(int(date) / 1000).strftime("%Y-%m-%d")
+            date = datetime.fromtimestamp(int(date) / 1000).strftime("%Y-%m-%d %H:%M")
+        # website url — external pehle, easy apply baad mein
+        apply    = data.get("applyMethod", {})
+        external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
+        easy     = apply.get("com.linkedin.voyager.jobs.ComplexOnsiteApply", {}).get("easyApplyUrl", "")
+        website  = external if external else easy
         return {
             "title":       data.get("title", ""),
             "description": data.get("description", {}).get("text", "")[:300],
             "location":    data.get("formattedLocation", ""),
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
-            "website_url": data.get("applyMethod", {}).get(
-                "com.linkedin.voyager.jobs.ComplexOnsiteApply", {}
-            ).get("easyApplyUrl", "")
+            "website_url": website
         }
     except Exception as e:
         print(f"Job data error: {e}")
@@ -94,17 +93,30 @@ def get_job_data(job_id, s):
 
 def is_relevant(title, description, query):
     try:
-        res = requests.post(
+        prompt = f"""You are a lead qualification and research expert.
+Your role is to work for our team as a lead generation manager.
+Your job is to review job postings and identify high quality leads for our team
+that is looking for AI automation, chatbot development, social media marketing, and workflow building services.
+
+Review this job posting and reply ONLY in this format:
+score: 7
+relevant: yes
+
+Job Title: {title}
+Description: {description[:200]}
+We are looking for: {query}
+
+Score 1-10 based on how good this lead is for our team.
+relevant: yes or no only."""
+
+        res    = requests.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": f"Is this job even slightly related to '{query}' OR any digital/tech/marketing/automation work?\nTitle: {title}\nDescription: {description[:200]}\nReply ONLY YES or NO."}]
-            }
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}]}
         )
-        answer = res.json()["choices"][0]["message"]["content"].strip().upper()
-        print(f"AI check '{title[:30]}': {answer}")
-        return "YES" in answer
+        answer = res.json()["choices"][0]["message"]["content"].strip().lower()
+        print(f"AI '{title[:30]}': {answer}")
+        return "relevant: yes" in answer
     except:
         return True
 
@@ -126,14 +138,15 @@ for query in QUERIES:
             continue
 
         data = get_job_data(job_id, s)
-        if not data:
+        if not data or not data.get("title"):
+            print(f"No data — skip!")
             continue
 
         if not is_relevant(data.get("title", ""), data.get("description", ""), query):
             print(f"Not relevant — skip!")
             continue
 
-        lead_score = max(10, 100 - rank)
+        lead_score = max(10, 100 - rank)  # rank se score
         save_to_sheet({
             "timestamp":   time.strftime("%Y-%m-%d %H:%M"),
             "title":       data.get("title", ""),
@@ -146,7 +159,7 @@ for query in QUERIES:
             "website_url": data.get("website_url", "")
         })
         seen.add(url)
-        print(f"Saved {data.get('title', '')}! Score: {lead_score}")
+        print(f"Saved '{data.get('title')}'! Score: {lead_score}")
         time.sleep(random.uniform(1, 3))
 
 save_seen(seen)
