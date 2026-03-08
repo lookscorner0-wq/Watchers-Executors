@@ -9,7 +9,7 @@ from datetime import datetime
 LI_AT         = os.environ["LI_AT"]
 LI_JSESSIONID = os.environ["LI_JSESSIONID"]
 OPENAI_KEY    = os.environ["OPENAI_KEY"]
-SHEET_URL     = "https://script.google.com/macros/s/AKfycbyC9kD6TNqrnSoFWeelHfF1kVkZxufVjOPfysicYaGYAQaqmuoFMSOyOUw--4XfPO5t/exec"
+SHEET_URL     = "https://script.google.com/macros/s/AKfycbxkaCOgzyTTBY4NjqHKbuEaKOi-1m0_KVd5Hl4iFCR4cWDcaMaISFWAgncM2svK8xPV/exec"
 SEEN_FILE     = "seen_urls.json"
 
 QUERIES = [
