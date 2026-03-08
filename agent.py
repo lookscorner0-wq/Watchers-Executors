@@ -46,8 +46,12 @@ def get_session():
 def search_jobs(query, s):
     try:
         kw  = query.replace(" ", "%20")
-        url = f"https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88&count=5&q=jobSearch&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)&servedEventEnabled=false&start=0&f_TPR=r259200"
-        res = s.get(url)
+        url = "https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards"
+        url += "?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88"
+        url += "&count=5&q=jobSearch"
+        url += f"&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)"
+        url += "&servedEventEnabled=false&start=0&f_TPR=r259200"
+        res   = s.get(url)
         print(f"Search '{query}': {res.status_code}")
         data  = res.json()
         cards = data.get("data", {}).get("metadata", {}).get("jobCardPrefetchQueries", [])
@@ -77,17 +81,20 @@ def get_job_data(job_id, s):
             }
         )
         if res.status_code != 200:
+            print(f"Job {job_id}: {res.status_code}")
             return None
         raw   = res.json()
         data  = raw.get("data", {})
         title = data.get("title", "")
+        print(f"Job {job_id} | Title: {title}")
         if not title:
             return None
         date = data.get("listedAt", "")
         if date:
             posted = datetime.fromtimestamp(int(date) / 1000)
-            if (datetime.now() - posted).days > 3:
-                print(f"Too old — skip!")
+            diff   = datetime.now() - posted
+            if diff.days > 3:
+                print(f"Too old ({diff.days} days) — skip!")
                 return None
             date = posted.strftime("%Y-%m-%d %H:%M")
         apply    = data.get("applyMethod", {})
@@ -121,7 +128,6 @@ We are looking for: {query}
 
 Score 1-10 based on how good this lead is for our team.
 relevant: yes or no only."""
-
         res    = requests.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_KEY}"},
@@ -151,15 +157,14 @@ for query in QUERIES:
             continue
 
         data = get_job_data(job_id, s)
-        if not data or not data.get("title"):
-            print(f"No data — skip!")
+        if not data:
             continue
 
         if not is_relevant(data.get("title", ""), data.get("description", ""), query):
             print(f"Not relevant — skip!")
             continue
 
-        lead_score = max(10, 100 - rank)  # rank se score
+        lead_score = max(10, 100 - rank)
         save_to_sheet({
             "timestamp":   time.strftime("%Y-%m-%d %H:%M"),
             "title":       data.get("title", ""),
