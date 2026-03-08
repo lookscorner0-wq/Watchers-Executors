@@ -46,6 +46,7 @@ def get_session():
 def search_jobs(query, s):
     try:
         kw  = query.replace(" ", "%20")
+        f_TPR=r259200 = last 3 days (72 hours)
         url = f"https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88&count=5&q=jobSearch&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)&servedEventEnabled=false&start=0"
         res = s.get(url)
         print(f"Search '{query}': {res.status_code}")
@@ -65,6 +66,22 @@ def search_jobs(query, s):
 
 def get_job_data(job_id, s):
     try:
+        # get_job_data ke baad
+if data:
+    date = data.get("post_date", "")
+    if date:
+        posted = datetime.strptime(date, "%Y-%m-%d %H:%M")
+        diff   = datetime.now() - posted
+        if diff.days > 3:
+            print(f"Too old ({diff.days} days) — skip!")
+            continue
+
+Time filters:
+
+r86400  = last 24 hours
+r172800 = last 2 days  
+r259200 = last 3 days  
+
         time.sleep(random.uniform(2, 4))
         res = s.get(
             f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}",
