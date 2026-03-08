@@ -76,20 +76,35 @@ def get_job_data(job_id, s):
                 "cookie": f'JSESSIONID="{LI_JSESSIONID}"; li_at={LI_AT}'
             }
         )
-        print(f"Job {job_id}: {res.status_code} | {len(res.text)} bytes")
-        if res.status_code != 200 or not res.text.strip():
+        if res.status_code != 200:
             return None
-        data = res.json()
+
+        raw = res.json()
+
+        # ✅ normalized JSON — data "included" array mein hota hai
+        data = None
+        for item in raw.get("included", []):
+            if item.get("title") and "jobPosting" in item.get("$type", ""):
+                data = item
+                break
+
+        # fallback — root mein check karo
+        if not data:
+            data = raw.get("data", raw)
+
         title = data.get("title", "")
         print(f"Title: {title}")
         if not title:
             return None
+
         date = data.get("listedAt", "")
         if date:
             date = datetime.fromtimestamp(int(date) / 1000).strftime("%Y-%m-%d %H:%M")
+
         apply    = data.get("applyMethod", {})
         external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
         easy     = apply.get("com.linkedin.voyager.jobs.ComplexOnsiteApply", {}).get("easyApplyUrl", "")
+
         return {
             "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
