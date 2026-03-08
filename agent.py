@@ -46,8 +46,7 @@ def get_session():
 def search_jobs(query, s):
     try:
         kw  = query.replace(" ", "%20")
-        f_TPR=r259200 = last 3 days (72 hours)
-        url = f"https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88&count=5&q=jobSearch&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)&servedEventEnabled=false&start=0"
+        url = f"https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88&count=5&q=jobSearch&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)&servedEventEnabled=false&start=0&f_TPR=r259200"
         res = s.get(url)
         print(f"Search '{query}': {res.status_code}")
         data  = res.json()
@@ -66,22 +65,6 @@ def search_jobs(query, s):
 
 def get_job_data(job_id, s):
     try:
-        # get_job_data ke baad
-if data:
-    date = data.get("post_date", "")
-    if date:
-        posted = datetime.strptime(date, "%Y-%m-%d %H:%M")
-        diff   = datetime.now() - posted
-        if diff.days > 3:
-            print(f"Too old ({diff.days} days) — skip!")
-            continue
-
-Time filters:
-
-r86400  = last 24 hours
-r172800 = last 2 days  
-r259200 = last 3 days  
-
         time.sleep(random.uniform(2, 4))
         res = s.get(
             f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}",
@@ -95,31 +78,27 @@ r259200 = last 3 days
         )
         if res.status_code != 200:
             return None
-
-        raw  = res.json()
-        data = raw.get("data", {})  # ✅ data key mein hai
-
+        raw   = res.json()
+        data  = raw.get("data", {})
         title = data.get("title", "")
-        print(f"Title: {title}")
         if not title:
             return None
-
         date = data.get("listedAt", "")
         if date:
-            date = datetime.fromtimestamp(int(date) / 1000).strftime("%Y-%m-%d %H:%M")
-
+            posted = datetime.fromtimestamp(int(date) / 1000)
+            if (datetime.now() - posted).days > 3:
+                print(f"Too old — skip!")
+                return None
+            date = posted.strftime("%Y-%m-%d %H:%M")
         apply    = data.get("applyMethod", {})
         external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
-                 # ✅ Easy Apply URL save mat karo — sirf external chahiye
-        website  = external if external else ""
-
         return {
             "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
-            "location":    data.get("formattedLocation", ""),  # ✅ sahi key
+            "location":    data.get("formattedLocation", ""),
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
-            "website_url": external if external else easy
+            "website_url": external
         }
     except Exception as e:
         print(f"Job data error: {e}")
