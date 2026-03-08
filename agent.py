@@ -110,7 +110,8 @@ r259200 = last 3 days
 
         apply    = data.get("applyMethod", {})
         external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
-        easy     = apply.get("easyApplyUrl", "")  # ✅ direct key
+                 # ✅ Easy Apply URL save mat karo — sirf external chahiye
+        website  = external if external else ""
 
         return {
             "title":       title,
