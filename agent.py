@@ -66,26 +66,37 @@ def search_jobs(query, s):
 def get_job_data(job_id, s):
     try:
         time.sleep(random.uniform(2, 4))
-        res  = s.get(f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}")
+        res = s.get(
+            f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}",
+            headers={
+                "accept": "application/vnd.linkedin.normalized+json+2.1",
+                "csrf-token": LI_JSESSIONID,
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+                "x-restli-protocol-version": "2.0.0",
+                "cookie": f'JSESSIONID="{LI_JSESSIONID}"; li_at={LI_AT}'
+            }
+        )
+        print(f"Job {job_id}: {res.status_code} | {len(res.text)} bytes")
         if res.status_code != 200 or not res.text.strip():
             return None
         data = res.json()
-        # date
+        title = data.get("title", "")
+        print(f"Title: {title}")
+        if not title:
+            return None
         date = data.get("listedAt", "")
         if date:
             date = datetime.fromtimestamp(int(date) / 1000).strftime("%Y-%m-%d %H:%M")
-        # website url — external pehle, easy apply baad mein
         apply    = data.get("applyMethod", {})
         external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
         easy     = apply.get("com.linkedin.voyager.jobs.ComplexOnsiteApply", {}).get("easyApplyUrl", "")
-        website  = external if external else easy
         return {
-            "title":       data.get("title", ""),
+            "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
             "location":    data.get("formattedLocation", ""),
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
-            "website_url": website
+            "website_url": external if external else easy
         }
     except Exception as e:
         print(f"Job data error: {e}")
