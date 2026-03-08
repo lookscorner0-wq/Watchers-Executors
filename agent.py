@@ -66,8 +66,15 @@ def search_jobs(query, s):
 def get_job_data(job_id, s):
     try:
         time.sleep(random.uniform(2, 4))
-        res  = s.get(f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}")
+        res  = s.get(
+            f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}",
+            headers={"accept": "application/vnd.linkedin.normalized+json+2.1"}
+        )
+        print(f"Job {job_id} status: {res.status_code} | size: {len(res.text)}")
+        if res.status_code != 200 or not res.text.strip():
+            return None
         data = res.json()
+        print(f"Title: {data.get('title', 'NOT FOUND')}")
         date = data.get("listedAt", "")
         if date:
             date = datetime.fromtimestamp(int(date) / 1000).strftime("%Y-%m-%d")
@@ -77,7 +84,9 @@ def get_job_data(job_id, s):
             "location":    data.get("formattedLocation", ""),
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
-            "website_url": data.get("applyMethod", {}).get("com.linkedin.voyager.jobs.ComplexOnsiteApply", {}).get("easyApplyUrl", "")
+            "website_url": data.get("applyMethod", {}).get(
+                "com.linkedin.voyager.jobs.ComplexOnsiteApply", {}
+            ).get("easyApplyUrl", "")
         }
     except Exception as e:
         print(f"Job data error: {e}")
