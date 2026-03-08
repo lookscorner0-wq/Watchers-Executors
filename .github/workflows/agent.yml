@@ -21,7 +21,6 @@ jobs:
       - run: pip install requests linkedin-api
       - run: python agent.py
         env:
-          SERPAPI_KEY:  ${{ secrets.SERPAPI_KEY }}
           OPENAI_KEY:   ${{ secrets.OPENAI_KEY }}
           LI_AT:        ${{ secrets.LI_AT }}
           LI_EMAIL:     ${{ secrets.LI_EMAIL }}
