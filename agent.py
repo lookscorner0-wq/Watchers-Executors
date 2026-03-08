@@ -79,18 +79,8 @@ def get_job_data(job_id, s):
         if res.status_code != 200:
             return None
 
-        raw = res.json()
-
-        # ✅ normalized JSON — data "included" array mein hota hai
-        data = None
-        for item in raw.get("included", []):
-            if item.get("title") and "jobPosting" in item.get("$type", ""):
-                data = item
-                break
-
-        # fallback — root mein check karo
-        if not data:
-            data = raw.get("data", raw)
+        raw  = res.json()
+        data = raw.get("data", {})  # ✅ data key mein hai
 
         title = data.get("title", "")
         print(f"Title: {title}")
@@ -103,12 +93,12 @@ def get_job_data(job_id, s):
 
         apply    = data.get("applyMethod", {})
         external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
-        easy     = apply.get("com.linkedin.voyager.jobs.ComplexOnsiteApply", {}).get("easyApplyUrl", "")
+        easy     = apply.get("easyApplyUrl", "")  # ✅ direct key
 
         return {
             "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
-            "location":    data.get("formattedLocation", ""),
+            "location":    data.get("formattedLocation", ""),  # ✅ sahi key
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
             "website_url": external if external else easy
