@@ -101,14 +101,14 @@ def get_job_data(job_id, s):
         atype    = apply.get("$type", "")
         external = apply.get("companyApplyUrl", "") if "OffsiteApply" in atype else ""
         easy     = apply.get("easyApplyUrl", "") if "ComplexOnsiteApply" in atype else ""
-        website  = external if external else easy
+        location = data.get("formattedLocation", "")
+        remote   = data.get("workRemoteAllowed", False)
+        if remote and "remote" not in location.lower():
+            location = f"Remote ({location})" if location else "Remote"
         return {
             "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
-            location = data.get("formattedLocation", "")
-            remote   = data.get("workRemoteAllowed", False)
-            if remote and "remote" not in location.lower():
-            location = f"Remote ({location})" if location else "Remote"
+            "location":    location,
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
             "website_url": external if external else easy
