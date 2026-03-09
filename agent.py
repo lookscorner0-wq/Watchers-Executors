@@ -49,7 +49,7 @@ def search_jobs(query, s):
         url = "https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards"
         url += "?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88"
         url += "&count=5&q=jobSearch"
-        url += f"&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},spellCorrectionEnabled:true)"
+        url += f"&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},locationUnion:(geoId:92000000),spellCorrectionEnabled:true)"
         url += "&servedEventEnabled=false&start=0&f_TPR=r259200"
         res   = s.get(url)
         print(f"Search '{query}': {res.status_code}")
@@ -105,7 +105,10 @@ def get_job_data(job_id, s):
         return {
             "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
-            "location":    data.get("formattedLocation", ""),
+            location = data.get("formattedLocation", "")
+            remote   = data.get("workRemoteAllowed", False)
+            if remote and "remote" not in location.lower():
+            location = f"Remote ({location})" if location else "Remote"
             "post_date":   date,
             "profile_url": data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
             "website_url": external if external else easy
