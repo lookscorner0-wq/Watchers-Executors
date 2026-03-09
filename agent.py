@@ -98,7 +98,9 @@ def get_job_data(job_id, s):
                 return None
             date = posted.strftime("%Y-%m-%d %H:%M")
         apply    = data.get("applyMethod", {})
-        external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
+external = apply.get("com.linkedin.voyager.jobs.OffsiteApply", {}).get("companyApplyUrl", "")
+easy     = apply.get("com.linkedin.voyager.jobs.ComplexOnsiteApply", {}).get("easyApplyUrl", "")
+website  = external if external else easy  # ✅ external pehle, easy apply fallback
         return {
             "title":       title,
             "description": data.get("description", {}).get("text", "")[:300],
