@@ -28,4 +28,5 @@ jobs:
           RESPONDER_SHEET_URL: ${{ secrets.RESPONDER_SHEET_URL }}
           MEMORY_URL: ${{ secrets.MEMORY_URL }}
           CONTEXT_URL: ${{ secrets.CONTEXT_URL }}
+          CASE_STUDY_URL: ${{ secrets.CASE_STUDY_URL }}
         run: python bilal.py
