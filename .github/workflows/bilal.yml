@@ -1,0 +1,31 @@
+name: Bilal Responder
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # har 2 ghante
+  workflow_dispatch:
+
+jobs:
+  run-bilal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+      - name: Run Bilal
+        env:
+          LI_AT: ${{ secrets.LI_AT }}
+          LI_JSESSIONID: ${{ secrets.LI_JSESSIONID }}
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          WATCHER_SHEET_URL: ${{ secrets.WATCHER_SHEET_URL }}
+          RESPONDER_SHEET_URL: ${{ secrets.RESPONDER_SHEET_URL }}
+          MEMORY_URL: ${{ secrets.MEMORY_URL }}
+          CONTEXT_URL: ${{ secrets.CONTEXT_URL }}
+        run: python bilal.py
