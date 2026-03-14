@@ -1,2 +1,3 @@
 requests
-linkedin-api
+httpx
+playwright
