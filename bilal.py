@@ -366,9 +366,6 @@ async def send_message_to_company(job_url, note):
         page = await context.new_page()
 
         try:
-            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(3, 5))
-
             await page.goto(job_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(4, 6))
 
@@ -423,7 +420,7 @@ async def send_message_to_company(job_url, note):
             """)
 
             if not clicked:
-                print(f"Message button nahi mila: {company_url}")
+                print(f"Message button nahi mila — skipping: {company_url}")
                 return False, company_name, company_url
 
             await asyncio.sleep(random.uniform(4, 6))
