@@ -6,14 +6,14 @@ import httpx
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 
-LI_AT                = os.environ["LI_AT"]
-LI_JSESSIONID        = os.environ["LI_JSESSIONID"]
-OPENAI_KEY           = os.environ["OPENAI_KEY"]
-WATCHER_SHEET_URL    = os.environ["WATCHER_SHEET_URL"]
-RESPONDER_SHEET_URL  = os.environ["RESPONDER_SHEET_URL"]
-MEMORY_URL           = os.environ["MEMORY_URL"]
-CONTEXT_URL          = os.environ["CONTEXT_URL"]
-CASE_STUDY_URL       = os.environ["CASE_STUDY_URL"]
+LI_AT               = os.environ["LI_AT"]
+LI_JSESSIONID       = os.environ["LI_JSESSIONID"]
+OPENAI_KEY          = os.environ["OPENAI_KEY"]
+WATCHER_SHEET_URL   = os.environ["WATCHER_SHEET_URL"]
+RESPONDER_SHEET_URL = os.environ["RESPONDER_SHEET_URL"]
+MEMORY_URL          = os.environ["MEMORY_URL"]
+CONTEXT_URL         = os.environ["CONTEXT_URL"]
+CASE_STUDY_URL      = os.environ["CASE_STUDY_URL"]
 
 MAX_CONNECTIONS_PER_RUN = 15
 MAX_MEMORY_ROWS         = 120
@@ -36,11 +36,11 @@ SYSTEM_PROMPT = (
 def build_brain():
     brain = ""
     try:
-        res         = requests.get(MEMORY_URL, timeout=10)
-        res2        = requests.get(CONTEXT_URL, timeout=10)
-        res3        = requests.get(CASE_STUDY_URL, timeout=10)
+        res  = requests.get(MEMORY_URL, timeout=10)
+        res2 = requests.get(CONTEXT_URL, timeout=10)
+        res3 = requests.get(CASE_STUDY_URL, timeout=10)
 
-        memory_rows     = res.json().get("rows", []) if res.status_code == 200 else []
+        memory_rows     = res.json().get("rows", [])  if res.status_code  == 200 else []
         context_rows    = res2.json().get("rows", []) if res2.status_code == 200 else []
         case_study_rows = res3.json().get("rows", []) if res3.status_code == 200 else []
 
@@ -69,15 +69,15 @@ def build_brain():
         if case_study_rows:
             brain += "\n\nCASE STUDIES (use as proof when client asks for results or references):\n"
             for row in case_study_rows:
-                client  = row.get("Client Name", "")
-                service = row.get("Service", "")
-                tier    = row.get("Tier", "")
-                problem = row.get("Problem", "")
-                built   = row.get("What We Built", "")
-                results = row.get("Results", "")
-                review  = row.get("Client Reviews", "")
-                pricing = row.get("Pricing", "")
+                client   = row.get("Client Name", "")
+                service  = row.get("Service", "")
+                tier     = row.get("Tier", "")
+                problem  = row.get("Problem", "")
+                built    = row.get("What We Built", "")
+                results  = row.get("Results", "")
+                review   = row.get("Client Reviews", "")
                 timeline = row.get("Time Line", "")
+                pricing  = row.get("Pricing", "")
                 brain += (
                     f"- Client: {client} | Service: {service} | Tier: {tier}\n"
                     f"  Problem: {problem}\n"
@@ -251,6 +251,20 @@ def determine_signal(client_message):
     return None
 
 
+async def is_already_in_responder(profile_url, company_name):
+    try:
+        res  = requests.get(RESPONDER_SHEET_URL, timeout=10)
+        rows = res.json().get("rows", []) if res.status_code == 200 else []
+        for row in rows:
+            if profile_url and row.get("Profile URL", "").strip().rstrip("/") == profile_url.strip().rstrip("/"):
+                return True
+            if company_name and company_name.lower() in row.get("Company Name", "").lower():
+                return True
+    except Exception as e:
+        print(f"Responder check error: {e}")
+    return False
+
+
 async def save_to_responder(data):
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -283,6 +297,7 @@ async def save_to_memory(data):
             return
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(MEMORY_URL, json=data)
+            print("Memory saved")
     except Exception as e:
         print(f"Memory save error: {e}")
 
@@ -296,6 +311,7 @@ async def save_to_context(data):
             return
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(CONTEXT_URL, json=data)
+            print("Context saved")
     except Exception as e:
         print(f"Context save error: {e}")
 
@@ -307,12 +323,12 @@ async def get_responder_record(profile_url, company_name):
 
         if profile_url:
             for row in rows:
-                if row.get("profile_url", "").strip().rstrip("/") == profile_url.strip().rstrip("/"):
+                if row.get("Profile URL", "").strip().rstrip("/") == profile_url.strip().rstrip("/"):
                     return row
 
         if company_name:
             for row in rows:
-                if company_name.lower() in row.get("company_name", "").lower():
+                if company_name.lower() in row.get("Company Name", "").lower():
                     return row
 
     except Exception as e:
@@ -356,7 +372,10 @@ async def send_message_to_company(job_url, note):
             await page.goto(job_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(4, 6))
 
-            company_url = await page.evaluate("""
+            await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
+            await asyncio.sleep(random.uniform(1, 2))
+
+            company_info = await page.evaluate("""
                 () => {
                     const links = Array.from(document.querySelectorAll('a'));
                     const company = links.find(l =>
@@ -372,32 +391,27 @@ async def send_message_to_company(job_url, note):
                         }
                     }
                     while (url.endsWith('/')) { url = url.slice(0, -1); }
-                    return url + '/';
+                    return {
+                        name: company.innerText.trim(),
+                        url:  url + '/'
+                    };
                 }
             """)
 
-            company_name = await page.evaluate("""
-                () => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const company = links.find(l =>
-                        l.href.includes('/company/') &&
-                        l.innerText.trim().length > 0
-                    );
-                    return company ? company.innerText.trim() : null;
-                }
-            """)
-
-            if not company_url:
+            if not company_info:
                 print(f"Company nahi mili: {job_url}")
                 return False, None, None
 
+            company_name = company_info["name"]
+            company_url  = company_info["url"]
             print(f"Company: {company_name} => {company_url}")
 
+            await asyncio.sleep(random.uniform(2, 3))
             await page.goto(company_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(4, 6))
 
             await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-            await asyncio.sleep(random.uniform(1, 2))
+            await asyncio.sleep(random.uniform(1, 3))
 
             clicked = await page.evaluate("""
                 () => {
@@ -444,17 +458,12 @@ async def send_message_to_company(job_url, note):
                 msg_box = await page.query_selector('textarea')
 
             if not msg_box:
-                print("Textarea nahi mila!")
+                print(f"Textarea nahi mila: {company_url}")
                 return False, company_name, company_url
 
             await msg_box.click()
             await asyncio.sleep(random.uniform(1, 2))
-
-            for char in note:
-                await msg_box.type(char, delay=random.uniform(80, 160))
-                if random.random() < 0.08:
-                    await asyncio.sleep(random.uniform(0.2, 0.5))
-
+            await human_type(msg_box, note)
             await asyncio.sleep(random.uniform(2, 3))
 
             sent = await page.evaluate("""
@@ -475,7 +484,7 @@ async def send_message_to_company(job_url, note):
             await asyncio.sleep(2)
 
             if sent:
-                print(f"Message sent to: {company_name}")
+                print(f"Message sent: {company_name}")
                 return True, company_name, company_url
             else:
                 print(f"Send failed: {company_name}")
@@ -627,41 +636,17 @@ async def read_and_reply(conv_url, brain):
                 await asyncio.sleep(random.uniform(2, 3))
                 print(f"Reply sent!")
 
-            profile_to_update = sender_profile_url or (responder_record.get("profile_url", "") if responder_record else "")
-            title_to_save     = responder_record.get("title", sender_name or "Unknown") if responder_record else (sender_name or "Unknown")
-            client_type       = responder_record.get("client_type", "Main Client") if responder_record else "Main Client"
-            company_name      = responder_record.get("company_name", sender_name or "") if responder_record else (sender_name or "")
+            profile_to_update = sender_profile_url or (responder_record.get("Profile URL", "") if responder_record else "")
+            title_to_save     = responder_record.get("Title", sender_name or "Unknown") if responder_record else (sender_name or "Unknown")
+            client_type       = responder_record.get("Client Type", "Main Client") if responder_record else "Main Client"
+            company_name      = responder_record.get("Company Name", sender_name or "") if responder_record else (sender_name or "")
 
             if signal == "Yellow":
                 alert_msg = f"Client said: {last_client_msg[:150]}"
                 await update_watcher(profile_to_update, if_alert=alert_msg)
-                await save_to_responder({
-                    "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "title":        title_to_save,
-                    "company_name": company_name,
-                    "client_type":  client_type,
-                    "lead_status":  "Alert",
-                    "lead_rank":    "Alert",
-                    "if_alert":     alert_msg,
-                    "profile_url":  profile_to_update,
-                    "note":         reply,
-                    "note_time":    datetime.now().strftime("%H:%M:%S")
-                })
 
             elif signal == "Green":
                 await update_watcher(profile_to_update, lead_status="Warm", lead_type="Warm")
-                await save_to_responder({
-                    "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "title":        title_to_save,
-                    "company_name": company_name,
-                    "client_type":  client_type,
-                    "lead_status":  "Warm",
-                    "lead_rank":    "Warm",
-                    "if_alert":     "",
-                    "profile_url":  profile_to_update,
-                    "note":         reply,
-                    "note_time":    datetime.now().strftime("%H:%M:%S")
-                })
                 await save_to_context({
                     "situation":       f"{client_type} — {title_to_save} — client replied positively",
                     "bilal_response":  reply,
@@ -726,33 +711,58 @@ async def send_cold_dm(profile_url, company_name, brain):
 
             await asyncio.sleep(random.uniform(3, 5))
 
-            msg_box = await page.query_selector('div.msg-form__contenteditable')
-            if not msg_box:
-                msg_box = await page.query_selector('div[role="textbox"]')
-            if not msg_box:
-                msg_box = await page.query_selector('div[contenteditable="true"]')
-
-            if msg_box:
-                await msg_box.click()
-                await asyncio.sleep(random.uniform(1, 2))
-                await human_type(msg_box, cold_message)
-                await asyncio.sleep(random.uniform(2, 4))
-
-                await page.evaluate("""
-                    () => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const btn = buttons.find(b =>
-                            b.innerText.trim() === 'Send' ||
-                            b.getAttribute('type') === 'submit'
-                        );
-                        if (btn) btn.click();
+            service_selected = await page.evaluate("""
+                () => {
+                    const sel = document.querySelector('select');
+                    if (!sel) return false;
+                    const opt = Array.from(sel.options).find(o =>
+                        o.text.toLowerCase().includes('service')
+                    );
+                    if (opt) {
+                        sel.value = opt.value;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
                     }
-                """)
-                await asyncio.sleep(random.uniform(2, 3))
-                print(f"Cold DM sent to: {company_name}")
-                return True
+                    if (sel.options.length > 1) {
+                        sel.value = sel.options[1].value;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                }
+            """)
 
-            return False
+            if service_selected:
+                await asyncio.sleep(random.uniform(1, 2))
+
+            msg_box = await page.query_selector('textarea.artdeco-text-input--input')
+            if not msg_box:
+                msg_box = await page.query_selector('textarea')
+
+            if not msg_box:
+                return False
+
+            await msg_box.click()
+            await asyncio.sleep(random.uniform(1, 2))
+            await human_type(msg_box, cold_message)
+            await asyncio.sleep(random.uniform(2, 3))
+
+            sent = await page.evaluate("""
+                () => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const btn = buttons.find(b =>
+                        b.innerText.trim() === 'Send message' ||
+                        b.innerText.trim() === 'Send'
+                    );
+                    if (btn && !btn.disabled) { btn.click(); return true; }
+                    return false;
+                }
+            """)
+
+            await asyncio.sleep(2)
+            if sent:
+                print(f"Cold DM sent: {company_name}")
+            return sent
 
         except Exception as e:
             print(f"Cold DM error: {e}")
@@ -773,7 +783,7 @@ async def main():
 
     for lead in leads:
         if connections_sent >= MAX_CONNECTIONS_PER_RUN:
-            print(f"Max connections reached ({MAX_CONNECTIONS_PER_RUN}) — stopping!")
+            print(f"Max reached ({MAX_CONNECTIONS_PER_RUN}) — stopping!")
             break
 
         job_url     = lead.get("profile_url", "")
@@ -797,18 +807,23 @@ async def main():
             connections_sent += 1
             now = datetime.now()
 
-            await save_to_responder({
-                "timestamp":    now.strftime("%Y-%m-%d %H:%M:%S"),
-                "title":        title,
-                "company_name": company_name or "",
-                "note":         note,
-                "client_type":  client_type,
-                "note_time":    now.strftime("%H:%M:%S"),
-                "lead_status":  "Message Sent",
-                "lead_rank":    "",
-                "if_alert":     "",
-                "profile_url":  company_url or job_url
-            })
+            already_saved = await is_already_in_responder(company_url, company_name)
+            if not already_saved:
+                await save_to_responder({
+                    "timestamp":    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "title":        title,
+                    "company_name": company_name or "",
+                    "note":         note,
+                    "client_type":  client_type,
+                    "note_time":    now.strftime("%H:%M:%S"),
+                    "lead_status":  "Message Sent",
+                    "lead_rank":    "",
+                    "if_alert":     "",
+                    "profile_url":  company_url or job_url
+                })
+                print(f"Saved to responder: {company_name}")
+            else:
+                print(f"Already in responder — skipping save: {company_name}")
 
             await update_watcher(
                 job_url,
@@ -829,10 +844,10 @@ async def main():
         rows = res.json().get("rows", []) if res.status_code == 200 else []
 
         for row in rows:
-            if row.get("lead_status") == "Message Sent":
-                sent_time    = row.get("timestamp", "")
-                profile_url  = row.get("profile_url", "")
-                company_name = row.get("company_name", "")
+            if row.get("Lead Status") == "Message Sent":
+                sent_time    = str(row.get("Timestamp", ""))
+                profile_url  = row.get("Profile URL", "")
+                company_name = row.get("Company Name", "")
                 try:
                     sent_dt     = datetime.strptime(sent_time, "%Y-%m-%d %H:%M:%S")
                     days_passed = (datetime.now() - sent_dt).days
@@ -845,7 +860,7 @@ async def main():
                     print(f"Follow-up timing error: {e}")
 
     except Exception as e:
-        print(f"Cold follow-up fetch error: {e}")
+        print(f"Cold follow-up error: {e}")
 
     print(f"\n--- Checking Messages ---")
     conversations = await check_messages()
