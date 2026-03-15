@@ -33,16 +33,28 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_brain():
+async def fetch_url(client, url):
+    try:
+        res = await client.get(url, timeout=10)
+        return res.json() if res.status_code == 200 else {}
+    except Exception as e:
+        print(f"Fetch error {url}: {e}")
+        return {}
+
+
+async def build_brain():
     brain = ""
     try:
-        res  = requests.get(MEMORY_URL, timeout=10)
-        res2 = requests.get(CONTEXT_URL, timeout=10)
-        res3 = requests.get(CASE_STUDY_URL, timeout=10)
+        async with httpx.AsyncClient() as client:
+            memory_data, context_data, case_data = await asyncio.gather(
+                fetch_url(client, MEMORY_URL),
+                fetch_url(client, CONTEXT_URL),
+                fetch_url(client, CASE_STUDY_URL)
+            )
 
-        memory_rows     = res.json().get("rows", [])  if res.status_code  == 200 else []
-        context_rows    = res2.json().get("rows", []) if res2.status_code == 200 else []
-        case_study_rows = res3.json().get("rows", []) if res3.status_code == 200 else []
+        memory_rows     = memory_data.get("rows", [])
+        context_rows    = context_data.get("rows", [])
+        case_study_rows = case_data.get("rows", [])
 
         rows_to_use = min(30, len(memory_rows), len(context_rows)) if memory_rows and context_rows else 0
 
@@ -87,7 +99,7 @@ def build_brain():
                     f"  Timeline: {timeline} | Pricing: {pricing}\n"
                 )
 
-        print(f"Brain built — Memory: {len(memory_rows)} | Context: {len(context_rows)} | Used pairs: {rows_to_use} | Case Studies: {len(case_study_rows)}")
+        print(f"Brain built — Memory: {len(memory_rows)} | Context: {len(context_rows)} | Used: {rows_to_use} | Cases: {len(case_study_rows)}")
 
     except Exception as e:
         print(f"Brain build error: {e}")
@@ -251,6 +263,27 @@ def determine_signal(client_message):
     return None
 
 
+def get_browser_context_args():
+    return {
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "viewport": {"width": 1366, "height": 768}
+    }
+
+
+def get_li_cookies():
+    return [
+        {"name": "li_at",      "value": LI_AT,                "domain": ".linkedin.com",     "path": "/"},
+        {"name": "JSESSIONID", "value": f'"{LI_JSESSIONID}"', "domain": ".www.linkedin.com", "path": "/"},
+    ]
+
+
+async def human_type(element, text):
+    for char in text:
+        await element.type(char, delay=random.uniform(80, 160))
+        if random.random() < 0.08:
+            await asyncio.sleep(random.uniform(0.2, 0.6))
+
+
 async def is_already_in_responder(profile_url, company_name):
     try:
         res  = requests.get(RESPONDER_SHEET_URL, timeout=10)
@@ -291,7 +324,7 @@ async def update_watcher(profile_url, lead_status=None, lead_type=None, client_t
 async def save_to_memory(data):
     try:
         res          = requests.get(MEMORY_URL, timeout=10)
-        current_rows = res.json().get("rows", []) if res.status_code == 200 else []
+        current_rows = res.json().get("rows", []) if res.status_code == 200 else {}
         if len(current_rows) >= MAX_MEMORY_ROWS:
             print("Memory sheet full — skipping save")
             return
@@ -305,7 +338,7 @@ async def save_to_memory(data):
 async def save_to_context(data):
     try:
         res          = requests.get(CONTEXT_URL, timeout=10)
-        current_rows = res.json().get("rows", []) if res.status_code == 200 else []
+        current_rows = res.json().get("rows", []) if res.status_code == 200 else {}
         if len(current_rows) >= MAX_CONTEXT_ROWS:
             print("Context sheet full — skipping save")
             return
@@ -320,462 +353,377 @@ async def get_responder_record(profile_url, company_name):
     try:
         res  = requests.get(RESPONDER_SHEET_URL, timeout=10)
         rows = res.json().get("rows", []) if res.status_code == 200 else []
-
         if profile_url:
             for row in rows:
                 if row.get("Profile URL", "").strip().rstrip("/") == profile_url.strip().rstrip("/"):
                     return row
-
         if company_name:
             for row in rows:
                 if company_name.lower() in row.get("Company Name", "").lower():
                     return row
-
     except Exception as e:
         print(f"Responder lookup error: {e}")
     return None
 
 
-def get_browser_context_args():
-    return {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "viewport": {"width": 1366, "height": 768}
-    }
+async def send_message_to_company(page, job_url, note):
+    try:
+        await page.goto(job_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(4, 6))
+        await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
+        await asyncio.sleep(random.uniform(1, 2))
 
-
-def get_li_cookies():
-    return [
-        {"name": "li_at",      "value": LI_AT,                "domain": ".linkedin.com",     "path": "/"},
-        {"name": "JSESSIONID", "value": f'"{LI_JSESSIONID}"', "domain": ".www.linkedin.com", "path": "/"},
-    ]
-
-
-async def human_type(element, text):
-    for char in text:
-        await element.type(char, delay=random.uniform(80, 160))
-        if random.random() < 0.08:
-            await asyncio.sleep(random.uniform(0.2, 0.6))
-
-
-async def send_message_to_company(job_url, note):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(**get_browser_context_args())
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-        await context.add_cookies(get_li_cookies())
-        page = await context.new_page()
-
-        try:
-            await page.goto(job_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(4, 6))
-
-            await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-            await asyncio.sleep(random.uniform(1, 2))
-
-            company_info = await page.evaluate("""
-                () => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const company = links.find(l =>
-                        l.href.includes('/company/') &&
-                        l.innerText.trim().length > 0
-                    );
-                    if (!company) return null;
-                    let url = company.href.split('?')[0];
-                    const suffixes = ['/life', '/about', '/jobs', '/people', '/posts'];
-                    for (const s of suffixes) {
-                        if (url.includes(s)) {
-                            url = url.substring(0, url.indexOf(s));
-                        }
+        company_info = await page.evaluate("""
+            () => {
+                const links = Array.from(document.querySelectorAll('a'));
+                const company = links.find(l =>
+                    l.href.includes('/company/') &&
+                    l.innerText.trim().length > 0
+                );
+                if (!company) return null;
+                let url = company.href.split('?')[0];
+                const suffixes = ['/life', '/about', '/jobs', '/people', '/posts'];
+                for (const s of suffixes) {
+                    if (url.includes(s)) {
+                        url = url.substring(0, url.indexOf(s));
                     }
-                    while (url.endsWith('/')) { url = url.slice(0, -1); }
-                    return {
-                        name: company.innerText.trim(),
-                        url:  url + '/'
-                    };
                 }
-            """)
+                while (url.endsWith('/')) { url = url.slice(0, -1); }
+                return { name: company.innerText.trim(), url: url + '/' };
+            }
+        """)
 
-            if not company_info:
-                print(f"Company nahi mili: {job_url}")
-                return False, None, None
-
-            company_name = company_info["name"]
-            company_url  = company_info["url"]
-            print(f"Company: {company_name} => {company_url}")
-
-            await asyncio.sleep(random.uniform(2, 3))
-            await page.goto(company_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(4, 6))
-
-            await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-            await asyncio.sleep(random.uniform(1, 3))
-
-            clicked = await page.evaluate("""
-                () => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const btn = buttons.find(b => b.innerText.trim() === 'Message');
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                }
-            """)
-
-            if not clicked:
-                print(f"Message button nahi mila — skipping: {company_url}")
-                return False, company_name, company_url
-
-            await asyncio.sleep(random.uniform(4, 6))
-
-            service_selected = await page.evaluate("""
-                () => {
-                    const sel = document.querySelector('select');
-                    if (!sel) return false;
-                    const opt = Array.from(sel.options).find(o =>
-                        o.text.toLowerCase().includes('service')
-                    );
-                    if (opt) {
-                        sel.value = opt.value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
-                    if (sel.options.length > 1) {
-                        sel.value = sel.options[1].value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
-                    return false;
-                }
-            """)
-
-            if service_selected:
-                print("Topic selected!")
-                await asyncio.sleep(random.uniform(1, 2))
-
-            msg_box = await page.query_selector('textarea.artdeco-text-input--input')
-            if not msg_box:
-                msg_box = await page.query_selector('textarea')
-
-            if not msg_box:
-                print(f"Textarea nahi mila: {company_url}")
-                return False, company_name, company_url
-
-            await msg_box.click()
-            await asyncio.sleep(random.uniform(1, 2))
-            await human_type(msg_box, note)
-            await asyncio.sleep(random.uniform(2, 3))
-
-            sent = await page.evaluate("""
-                () => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const btn = buttons.find(b =>
-                        b.innerText.trim() === 'Send message' ||
-                        b.innerText.trim() === 'Send'
-                    );
-                    if (btn && !btn.disabled) {
-                        btn.click();
-                        return btn.innerText.trim();
-                    }
-                    return null;
-                }
-            """)
-
-            await asyncio.sleep(2)
-
-            if sent:
-                print(f"Message sent: {company_name}")
-                return True, company_name, company_url
-            else:
-                print(f"Send failed: {company_name}")
-                return False, company_name, company_url
-
-        except Exception as e:
-            print(f"Send message error: {e}")
+        if not company_info:
+            print(f"Company not found: {job_url}")
             return False, None, None
-        finally:
-            await browser.close()
 
+        company_name = company_info["name"]
+        company_url  = company_info["url"]
+        print(f"Company: {company_name} => {company_url}")
 
-async def check_messages():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(**get_browser_context_args())
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-        await context.add_cookies(get_li_cookies())
-        page = await context.new_page()
+        await asyncio.sleep(random.uniform(2, 3))
+        await page.goto(company_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(4, 6))
+        await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
+        await asyncio.sleep(random.uniform(1, 3))
 
-        try:
-            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(3, 5))
+        clicked = await page.evaluate("""
+            () => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const btn = buttons.find(b => b.innerText.trim() === 'Message');
+                if (btn) { btn.click(); return true; }
+                return false;
+            }
+        """)
 
-            await page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(5, 8))
+        if not clicked:
+            print(f"Message button not found: {company_url}")
+            return False, company_name, company_url
 
-            await page.mouse.move(random.randint(200, 600), random.randint(200, 400))
+        await asyncio.sleep(random.uniform(4, 6))
+
+        service_selected = await page.evaluate("""
+            () => {
+                const sel = document.querySelector('select');
+                if (!sel) return false;
+                const opt = Array.from(sel.options).find(o =>
+                    o.text.toLowerCase().includes('service')
+                );
+                if (opt) {
+                    sel.value = opt.value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+                if (sel.options.length > 1) {
+                    sel.value = sel.options[1].value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+                return false;
+            }
+        """)
+
+        if service_selected:
             await asyncio.sleep(random.uniform(1, 2))
 
-            conversations = await page.evaluate("""
-                () => {
-                    const convs = Array.from(document.querySelectorAll('.msg-conversation-listitem'));
-                    const unread = convs.filter(c => c.querySelector('.msg-conversation-listitem__unread-count'));
-                    return unread.map(c => {
-                        const link = c.querySelector('a');
-                        return link ? link.href : null;
-                    }).filter(Boolean);
-                }
-            """)
+        msg_box = await page.query_selector('textarea.artdeco-text-input--input')
+        if not msg_box:
+            msg_box = await page.query_selector('textarea')
+        if not msg_box:
+            print(f"Textarea not found: {company_url}")
+            return False, company_name, company_url
 
-            print(f"Unread conversations: {len(conversations)}")
-            return conversations
+        await msg_box.click()
+        await asyncio.sleep(random.uniform(1, 2))
+        await human_type(msg_box, note)
+        await asyncio.sleep(random.uniform(2, 3))
 
-        except Exception as e:
-            print(f"Check messages error: {e}")
-            return []
-        finally:
-            await browser.close()
+        sent = await page.evaluate("""
+            () => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const btn = buttons.find(b =>
+                    b.innerText.trim() === 'Send message' ||
+                    b.innerText.trim() === 'Send'
+                );
+                if (btn && !btn.disabled) { btn.click(); return btn.innerText.trim(); }
+                return null;
+            }
+        """)
 
+        await asyncio.sleep(2)
 
-async def read_and_reply(conv_url, brain):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(**get_browser_context_args())
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-        await context.add_cookies(get_li_cookies())
-        page = await context.new_page()
+        if sent:
+            print(f"Message sent: {company_name}")
+            return True, company_name, company_url
+        else:
+            print(f"Send failed: {company_name}")
+            return False, company_name, company_url
 
-        try:
-            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(3, 5))
-
-            await page.goto(conv_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(5, 8))
-
-            await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-            await asyncio.sleep(random.uniform(1, 3))
-
-            sender_profile_url = await page.evaluate("""
-                () => {
-                    const link = document.querySelector(
-                        '.msg-thread__link-to-profile, a[href*="/in/"], a[href*="/company/"]'
-                    );
-                    return link ? link.href.split('?')[0] : null;
-                }
-            """)
-
-            sender_name = await page.evaluate("""
-                () => {
-                    const el = document.querySelector(
-                        '.msg-entity-lockup__entity-title, .msg-thread__participant-name'
-                    );
-                    return el ? el.innerText.trim() : null;
-                }
-            """)
-
-            print(f"Sender: {sender_name} — {sender_profile_url}")
-
-            responder_record = await get_responder_record(sender_profile_url, sender_name)
-
-            await asyncio.sleep(random.uniform(2, 4))
-
-            messages = await page.evaluate("""
-                () => {
-                    const msgs = Array.from(document.querySelectorAll('.msg-s-message-list__event'));
-                    return msgs.map(m => {
-                        const sender = m.querySelector('.msg-s-message-group__name');
-                        const text   = m.querySelector('.msg-s-event-listitem__body');
-                        return {
-                            role: sender ? 'client' : 'bilal',
-                            text: text ? text.innerText.trim() : ''
-                        };
-                    }).filter(m => m.text);
-                }
-            """)
-
-            if not messages:
-                return
-
-            last_client_msg = ""
-            for msg in reversed(messages):
-                if msg["role"] == "client":
-                    last_client_msg = msg["text"]
-                    break
-
-            if not last_client_msg:
-                return
-
-            print(f"Last client message: {last_client_msg[:80]}")
-
-            signal = determine_signal(last_client_msg)
-            reply  = generate_dm(messages, brain)
-
-            await asyncio.sleep(random.uniform(3, 6))
-
-            msg_box = await page.query_selector('div.msg-form__contenteditable')
-            if not msg_box:
-                msg_box = await page.query_selector('div[role="textbox"]')
-            if not msg_box:
-                msg_box = await page.query_selector('div[contenteditable="true"]')
-
-            if msg_box:
-                await msg_box.click()
-                await asyncio.sleep(random.uniform(1, 2))
-                await human_type(msg_box, reply)
-                await asyncio.sleep(random.uniform(2, 4))
-
-                await page.evaluate("""
-                    () => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const btn = buttons.find(b =>
-                            b.innerText.trim() === 'Send' ||
-                            b.getAttribute('type') === 'submit'
-                        );
-                        if (btn) btn.click();
-                    }
-                """)
-                await asyncio.sleep(random.uniform(2, 3))
-                print(f"Reply sent!")
-
-            profile_to_update = sender_profile_url or (responder_record.get("Profile URL", "") if responder_record else "")
-            title_to_save     = responder_record.get("Title", sender_name or "Unknown") if responder_record else (sender_name or "Unknown")
-            client_type       = responder_record.get("Client Type", "Main Client") if responder_record else "Main Client"
-            company_name      = responder_record.get("Company Name", sender_name or "") if responder_record else (sender_name or "")
-
-            if signal == "Yellow":
-                alert_msg = f"Client said: {last_client_msg[:150]}"
-                await update_watcher(profile_to_update, if_alert=alert_msg)
-
-            elif signal == "Green":
-                await update_watcher(profile_to_update, lead_status="Warm", lead_type="Warm")
-                await save_to_context({
-                    "situation":       f"{client_type} — {title_to_save} — client replied positively",
-                    "bilal_response":  reply,
-                    "client_reaction": last_client_msg,
-                    "lesson":          "Positive response — note what worked",
-                    "what_worked":     "Client engaged positively"
-                })
-
-            elif signal == "Red":
-                await update_watcher(profile_to_update, lead_status="Missed", lead_type="Cold")
-                await save_to_memory({
-                    "what_failed":      f"Client said: {last_client_msg[:100]}",
-                    "service_interest": title_to_save,
-                    "client_type":      client_type,
-                    "date_time":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "signal":           "Red",
-                    "emotion_tone":     "Cold",
-                    "followup_need":    "No",
-                    "better_response":  "Review what was said before this rejection"
-                })
-
-        except Exception as e:
-            print(f"Read reply error: {e}")
-        finally:
-            await browser.close()
+    except Exception as e:
+        print(f"Send message error: {e}")
+        return False, None, None
 
 
-async def send_cold_dm(profile_url, company_name, brain):
-    cold_message = "Hey, just checking if you had a chance to review my message — worth a 5 min chat?"
+async def check_messages(page):
+    try:
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(3, 5))
+        await page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(5, 8))
+        await page.mouse.move(random.randint(200, 600), random.randint(200, 400))
+        await asyncio.sleep(random.uniform(1, 2))
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(**get_browser_context_args())
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-        await context.add_cookies(get_li_cookies())
-        page = await context.new_page()
+        conversations = await page.evaluate("""
+            () => {
+                const convs = Array.from(document.querySelectorAll('.msg-conversation-listitem'));
+                const unread = convs.filter(c => c.querySelector('.msg-conversation-listitem__unread-count'));
+                return unread.map(c => {
+                    const link = c.querySelector('a');
+                    return link ? link.href : null;
+                }).filter(Boolean);
+            }
+        """)
 
-        try:
-            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(4, 7))
+        print(f"Unread conversations: {len(conversations)}")
+        return conversations
 
-            await page.goto(profile_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(5, 8))
+    except Exception as e:
+        print(f"Check messages error: {e}")
+        return []
 
-            await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-            await asyncio.sleep(random.uniform(2, 4))
 
-            clicked = await page.evaluate("""
-                () => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const btn = buttons.find(b =>
-                        b.innerText.trim() === 'Message' ||
-                        b.innerText.trim() === 'Send message'
-                    );
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                }
-            """)
+async def read_and_reply(page, conv_url, brain):
+    try:
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(3, 5))
+        await page.goto(conv_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(5, 8))
+        await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
+        await asyncio.sleep(random.uniform(1, 3))
 
-            if not clicked:
-                return False
+        sender_profile_url = await page.evaluate("""
+            () => {
+                const link = document.querySelector(
+                    '.msg-thread__link-to-profile, a[href*="/in/"], a[href*="/company/"]'
+                );
+                return link ? link.href.split('?')[0] : null;
+            }
+        """)
 
-            await asyncio.sleep(random.uniform(3, 5))
+        sender_name = await page.evaluate("""
+            () => {
+                const el = document.querySelector(
+                    '.msg-entity-lockup__entity-title, .msg-thread__participant-name'
+                );
+                return el ? el.innerText.trim() : null;
+            }
+        """)
 
-            service_selected = await page.evaluate("""
-                () => {
-                    const sel = document.querySelector('select');
-                    if (!sel) return false;
-                    const opt = Array.from(sel.options).find(o =>
-                        o.text.toLowerCase().includes('service')
-                    );
-                    if (opt) {
-                        sel.value = opt.value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
-                    if (sel.options.length > 1) {
-                        sel.value = sel.options[1].value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
-                    return false;
-                }
-            """)
+        print(f"Sender: {sender_name} — {sender_profile_url}")
 
-            if service_selected:
-                await asyncio.sleep(random.uniform(1, 2))
+        responder_record = await get_responder_record(sender_profile_url, sender_name)
 
-            msg_box = await page.query_selector('textarea.artdeco-text-input--input')
-            if not msg_box:
-                msg_box = await page.query_selector('textarea')
+        await asyncio.sleep(random.uniform(2, 4))
 
-            if not msg_box:
-                return False
+        messages = await page.evaluate("""
+            () => {
+                const msgs = Array.from(document.querySelectorAll('.msg-s-message-list__event'));
+                return msgs.map(m => {
+                    const sender = m.querySelector('.msg-s-message-group__name');
+                    const text   = m.querySelector('.msg-s-event-listitem__body');
+                    return {
+                        role: sender ? 'client' : 'bilal',
+                        text: text ? text.innerText.trim() : ''
+                    };
+                }).filter(m => m.text);
+            }
+        """)
 
+        if not messages:
+            return
+
+        last_client_msg = ""
+        for msg in reversed(messages):
+            if msg["role"] == "client":
+                last_client_msg = msg["text"]
+                break
+
+        if not last_client_msg:
+            return
+
+        print(f"Last client message: {last_client_msg[:80]}")
+
+        signal = determine_signal(last_client_msg)
+        reply  = generate_dm(messages, brain)
+
+        await asyncio.sleep(random.uniform(3, 6))
+
+        msg_box = await page.query_selector('div.msg-form__contenteditable')
+        if not msg_box:
+            msg_box = await page.query_selector('div[role="textbox"]')
+        if not msg_box:
+            msg_box = await page.query_selector('div[contenteditable="true"]')
+
+        if msg_box:
             await msg_box.click()
             await asyncio.sleep(random.uniform(1, 2))
-            await human_type(msg_box, cold_message)
-            await asyncio.sleep(random.uniform(2, 3))
+            await human_type(msg_box, reply)
+            await asyncio.sleep(random.uniform(2, 4))
 
-            sent = await page.evaluate("""
+            await page.evaluate("""
                 () => {
                     const buttons = Array.from(document.querySelectorAll('button'));
                     const btn = buttons.find(b =>
-                        b.innerText.trim() === 'Send message' ||
-                        b.innerText.trim() === 'Send'
+                        b.innerText.trim() === 'Send' ||
+                        b.getAttribute('type') === 'submit'
                     );
-                    if (btn && !btn.disabled) { btn.click(); return true; }
-                    return false;
+                    if (btn) btn.click();
                 }
             """)
+            await asyncio.sleep(random.uniform(2, 3))
+            print(f"Reply sent!")
 
-            await asyncio.sleep(2)
-            if sent:
-                print(f"Cold DM sent: {company_name}")
-            return sent
+        profile_to_update = sender_profile_url or (responder_record.get("Profile URL", "") if responder_record else "")
+        title_to_save     = responder_record.get("Title", sender_name or "Unknown") if responder_record else (sender_name or "Unknown")
+        client_type       = responder_record.get("Client Type", "Main Client") if responder_record else "Main Client"
+        company_name      = responder_record.get("Company Name", sender_name or "") if responder_record else (sender_name or "")
 
-        except Exception as e:
-            print(f"Cold DM error: {e}")
+        if signal == "Yellow":
+            alert_msg = f"Client said: {last_client_msg[:150]}"
+            await update_watcher(profile_to_update, if_alert=alert_msg)
+        elif signal == "Green":
+            await update_watcher(profile_to_update, lead_status="Warm", lead_type="Warm")
+            await save_to_context({
+                "situation":       f"{client_type} — {title_to_save} — client replied positively",
+                "bilal_response":  reply,
+                "client_reaction": last_client_msg,
+                "lesson":          "Positive response — note what worked",
+                "what_worked":     "Client engaged positively"
+            })
+        elif signal == "Red":
+            await update_watcher(profile_to_update, lead_status="Missed", lead_type="Cold")
+            await save_to_memory({
+                "what_failed":      f"Client said: {last_client_msg[:100]}",
+                "service_interest": title_to_save,
+                "client_type":      client_type,
+                "date_time":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "signal":           "Red",
+                "emotion_tone":     "Cold",
+                "followup_need":    "No",
+                "better_response":  "Review what was said before this rejection"
+            })
+
+    except Exception as e:
+        print(f"Read reply error: {e}")
+
+
+async def send_cold_dm(page, profile_url, company_name):
+    cold_message = "Hey, just checking if you had a chance to review my message — worth a 5 min chat?"
+    try:
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(4, 7))
+        await page.goto(profile_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(5, 8))
+        await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
+        await asyncio.sleep(random.uniform(2, 4))
+
+        clicked = await page.evaluate("""
+            () => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const btn = buttons.find(b =>
+                    b.innerText.trim() === 'Message' ||
+                    b.innerText.trim() === 'Send message'
+                );
+                if (btn) { btn.click(); return true; }
+                return false;
+            }
+        """)
+
+        if not clicked:
             return False
-        finally:
-            await browser.close()
+
+        await asyncio.sleep(random.uniform(3, 5))
+
+        service_selected = await page.evaluate("""
+            () => {
+                const sel = document.querySelector('select');
+                if (!sel) return false;
+                const opt = Array.from(sel.options).find(o =>
+                    o.text.toLowerCase().includes('service')
+                );
+                if (opt) {
+                    sel.value = opt.value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+                if (sel.options.length > 1) {
+                    sel.value = sel.options[1].value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+                return false;
+            }
+        """)
+
+        if service_selected:
+            await asyncio.sleep(random.uniform(1, 2))
+
+        msg_box = await page.query_selector('textarea.artdeco-text-input--input')
+        if not msg_box:
+            msg_box = await page.query_selector('textarea')
+        if not msg_box:
+            return False
+
+        await msg_box.click()
+        await asyncio.sleep(random.uniform(1, 2))
+        await human_type(msg_box, cold_message)
+        await asyncio.sleep(random.uniform(2, 3))
+
+        sent = await page.evaluate("""
+            () => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const btn = buttons.find(b =>
+                    b.innerText.trim() === 'Send message' ||
+                    b.innerText.trim() === 'Send'
+                );
+                if (btn && !btn.disabled) { btn.click(); return true; }
+                return false;
+            }
+        """)
+
+        await asyncio.sleep(2)
+        if sent:
+            print(f"Cold DM sent: {company_name}")
+        return sent
+
+    except Exception as e:
+        print(f"Cold DM error: {e}")
+        return False
 
 
-async def main():
-    print(f"\n{'='*50}")
-    print(f"Bilal Starting: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*50}")
-
-    brain = build_brain()
-    leads = fetch_leads()
-
+async def part_one(page, brain):
+    print("\n--- PART 1: Sending Messages ---")
+    leads            = fetch_leads()
     connections_sent = 0
 
     for lead in leads:
@@ -796,15 +744,14 @@ async def main():
         lead["client_type"] = client_type
         print(f"Client Type: {client_type}")
 
-        note = generate_hook(lead, brain)
-
-        success, company_name, company_url = await send_message_to_company(job_url, note)
+        note    = generate_hook(lead, brain)
+        success, company_name, company_url = await send_message_to_company(page, job_url, note)
 
         if success:
             connections_sent += 1
-            now = datetime.now()
+            now              = datetime.now()
+            already_saved    = await is_already_in_responder(company_url, company_name)
 
-            already_saved = await is_already_in_responder(company_url, company_name)
             if not already_saved:
                 await save_to_responder({
                     "timestamp":    now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -820,22 +767,16 @@ async def main():
                 })
                 print(f"Saved to responder: {company_name}")
             else:
-                print(f"Already in responder — skipping save: {company_name}")
+                print(f"Already in responder — skipping: {company_name}")
 
-            await update_watcher(
-                job_url,
-                lead_status="Message Sent",
-                lead_type="Warm",
-                client_type=client_type
-            )
-
+            await update_watcher(job_url, lead_status="Message Sent", lead_type="Warm", client_type=client_type)
             print(f"Done: {title}")
             await asyncio.sleep(random.uniform(15, 30))
         else:
             print(f"Failed: {title}")
             await asyncio.sleep(random.uniform(5, 10))
 
-    print(f"\n--- Checking Cold Follow-ups ---")
+    print("\n--- Cold Follow-ups ---")
     try:
         res  = requests.get(RESPONDER_SHEET_URL, timeout=10)
         rows = res.json().get("rows", []) if res.status_code == 200 else []
@@ -849,7 +790,7 @@ async def main():
                     sent_dt     = datetime.strptime(sent_time, "%Y-%m-%d %H:%M:%S")
                     days_passed = (datetime.now() - sent_dt).days
                     if days_passed >= 3 and profile_url:
-                        success = await send_cold_dm(profile_url, company_name, brain)
+                        success = await send_cold_dm(page, profile_url, company_name)
                         if success:
                             await update_watcher(profile_url, lead_status="Cold DM Sent")
                         await asyncio.sleep(random.uniform(15, 30))
@@ -859,16 +800,43 @@ async def main():
     except Exception as e:
         print(f"Cold follow-up error: {e}")
 
-    print(f"\n--- Checking Messages ---")
-    conversations = await check_messages()
 
+async def part_two(page, brain):
+    print("\n--- PART 2: Checking Messages ---")
+    conversations = await check_messages(page)
     for conv_url in conversations:
-        await read_and_reply(conv_url, brain)
+        await read_and_reply(page, conv_url, brain)
         await asyncio.sleep(random.uniform(20, 40))
+
+
+async def main():
+    print(f"\n{'='*50}")
+    print(f"Bilal Starting: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}")
+
+    brain = await build_brain()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(**get_browser_context_args())
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        await context.add_cookies(get_li_cookies())
+        page = await context.new_page()
+
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(3, 5))
+
+        mode = os.environ.get("RUN_MODE", "part1")
+
+        if mode == "part1":
+            await part_one(page, brain)
+        elif mode == "part2":
+            await part_two(page, brain)
+
+        await browser.close()
 
     print(f"\n{'='*50}")
     print(f"Bilal Done: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Connections sent: {connections_sent}")
     print(f"{'='*50}")
 
 
