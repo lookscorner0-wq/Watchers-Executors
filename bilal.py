@@ -373,7 +373,7 @@ async def send_message_to_company(page, job_url, note):
         await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
         await asyncio.sleep(random.uniform(1, 2))
 
-        company_info = await page.evaluate("""
+        company_url = await page.evaluate("""
             () => {
                 const links = Array.from(document.querySelectorAll('a'));
                 const company = links.find(l =>
@@ -389,16 +389,15 @@ async def send_message_to_company(page, job_url, note):
                     }
                 }
                 while (url.endsWith('/')) { url = url.slice(0, -1); }
-                return { name: company.innerText.trim(), url: url + '/' };
+                return url + '/';
             }
         """)
 
-        if not company_info:
+        if not company_url:
             print(f"Company not found: {job_url}")
             return False, None, None
 
-        company_name = company_info["name"]
-        company_url  = company_info["url"]
+        company_name = company_url.split('/company/')[1].replace('/', '').strip()
         print(f"Company: {company_name} => {company_url}")
 
         await asyncio.sleep(random.uniform(2, 3))
@@ -410,11 +409,39 @@ async def send_message_to_company(page, job_url, note):
         clicked = await page.evaluate("""
             () => {
                 const buttons = Array.from(document.querySelectorAll('button'));
-                const btn = buttons.find(b => b.innerText.trim() === 'Message');
-                if (btn) { btn.click(); return true; }
+                const msgBtn = buttons.find(b =>
+                    b.innerText.trim() === 'Message' ||
+                    b.innerText.trim() === 'Send message'
+                );
+                if (msgBtn) { msgBtn.click(); return true; }
+
+                const moreBtn = buttons.find(b =>
+                    b.getAttribute('aria-label') === 'More' ||
+                    b.innerText.trim() === '...' ||
+                    b.querySelector('li-icon[type="overflow-web-ios-medium"]') ||
+                    b.querySelector('icon[type="ellipsis-horizontal"]')
+                );
+                if (moreBtn) { moreBtn.click(); return 'dots'; }
+
                 return false;
             }
         """)
+
+        if clicked == 'dots':
+            await asyncio.sleep(random.uniform(1, 2))
+            clicked = await page.evaluate("""
+                () => {
+                    const items = Array.from(document.querySelectorAll(
+                        '.artdeco-dropdown__item, li, [role="menuitem"]'
+                    ));
+                    const msgItem = items.find(i =>
+                        i.innerText.trim().toLowerCase().includes('message') ||
+                        i.innerText.trim().toLowerCase().includes('send message')
+                    );
+                    if (msgItem) { msgItem.click(); return true; }
+                    return false;
+                }
+            """)
 
         if not clicked:
             print(f"Message button not found: {company_url}")
