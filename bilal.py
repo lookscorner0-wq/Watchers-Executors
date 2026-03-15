@@ -351,98 +351,135 @@ async def send_message_to_company(job_url, note):
 
         try:
             await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(4, 7))
+            await asyncio.sleep(random.uniform(3, 5))
 
             await page.goto(job_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(5, 8))
+            await asyncio.sleep(random.uniform(4, 6))
+
+            company_url = await page.evaluate("""
+                () => {
+                    const links = Array.from(document.querySelectorAll('a'));
+                    const company = links.find(l =>
+                        l.href.includes('/company/') &&
+                        l.innerText.trim().length > 0
+                    );
+                    if (!company) return null;
+                    let url = company.href.split('?')[0];
+                    const suffixes = ['/life', '/about', '/jobs', '/people', '/posts'];
+                    for (const s of suffixes) {
+                        if (url.includes(s)) {
+                            url = url.substring(0, url.indexOf(s));
+                        }
+                    }
+                    while (url.endsWith('/')) { url = url.slice(0, -1); }
+                    return url + '/';
+                }
+            """)
+
+            company_name = await page.evaluate("""
+                () => {
+                    const links = Array.from(document.querySelectorAll('a'));
+                    const company = links.find(l =>
+                        l.href.includes('/company/') &&
+                        l.innerText.trim().length > 0
+                    );
+                    return company ? company.innerText.trim() : null;
+                }
+            """)
+
+            if not company_url:
+                print(f"Company nahi mili: {job_url}")
+                return False, None, None
+
+            print(f"Company: {company_name} => {company_url}")
+
+            await page.goto(company_url, wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(4, 6))
 
             await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
             await asyncio.sleep(random.uniform(1, 2))
 
-            company_data = await page.evaluate("""
-                () => {
-                    const selectors = [
-                        '.job-details-jobs-unified-top-card__company-name a',
-                        '.jobs-unified-top-card__company-name a',
-                        '.jobs-details-top-card__company-url',
-                        'a[data-tracking-control-name="public_jobs_topcard-org-name"]',
-                        '.topcard__org-name-link',
-                        '.job-card-container__primary-description a',
-                        'a[href*="/company/"]'
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el && el.href && el.href.includes('/company/')) {
-                            return {
-                                name: el.innerText.trim(),
-                                url: el.href.split('?')[0]
-                            };
-                        }
-                    }
-                    return null;
-                }
-            """)
-
-            if not company_data:
-                print(f"Company not found for job: {job_url}")
-                return False, None, None
-
-            company_name = company_data["name"]
-            company_url  = company_data["url"]
-            print(f"Company found: {company_name} — {company_url}")
-
-            await asyncio.sleep(random.uniform(2, 4))
-            await page.goto(company_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(5, 8))
-
-            await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-            await asyncio.sleep(random.uniform(1, 3))
-
             clicked = await page.evaluate("""
                 () => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const btn = buttons.find(b =>
-                        b.innerText.trim() === 'Message' ||
-                        b.innerText.trim() === 'Send message'
-                    );
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const btn = buttons.find(b => b.innerText.trim() === 'Message');
                     if (btn) { btn.click(); return true; }
                     return false;
                 }
             """)
 
             if not clicked:
-                print(f"Message button not found for: {company_url}")
+                print(f"Message button nahi mila: {company_url}")
                 return False, company_name, company_url
 
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(random.uniform(4, 6))
 
-            msg_box = await page.query_selector('div.msg-form__contenteditable')
-            if not msg_box:
-                msg_box = await page.query_selector('div[role="textbox"]')
-            if not msg_box:
-                msg_box = await page.query_selector('div[contenteditable="true"]')
-
-            if msg_box:
-                await msg_box.click()
-                await asyncio.sleep(random.uniform(1, 2))
-                await human_type(msg_box, note)
-                await asyncio.sleep(random.uniform(2, 4))
-
-                await page.evaluate("""
-                    () => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const btn = buttons.find(b =>
-                            b.innerText.trim() === 'Send' ||
-                            b.getAttribute('type') === 'submit'
-                        );
-                        if (btn) btn.click();
+            service_selected = await page.evaluate("""
+                () => {
+                    const sel = document.querySelector('select');
+                    if (!sel) return false;
+                    const opt = Array.from(sel.options).find(o =>
+                        o.text.toLowerCase().includes('service')
+                    );
+                    if (opt) {
+                        sel.value = opt.value;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
                     }
-                """)
-                await asyncio.sleep(random.uniform(2, 3))
+                    if (sel.options.length > 1) {
+                        sel.value = sel.options[1].value;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                }
+            """)
+
+            if service_selected:
+                print("Topic selected!")
+                await asyncio.sleep(random.uniform(1, 2))
+
+            msg_box = await page.query_selector('textarea.artdeco-text-input--input')
+            if not msg_box:
+                msg_box = await page.query_selector('textarea')
+
+            if not msg_box:
+                print("Textarea nahi mila!")
+                return False, company_name, company_url
+
+            await msg_box.click()
+            await asyncio.sleep(random.uniform(1, 2))
+
+            for char in note:
+                await msg_box.type(char, delay=random.uniform(80, 160))
+                if random.random() < 0.08:
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            await asyncio.sleep(random.uniform(2, 3))
+
+            sent = await page.evaluate("""
+                () => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const btn = buttons.find(b =>
+                        b.innerText.trim() === 'Send message' ||
+                        b.innerText.trim() === 'Send'
+                    );
+                    if (btn && !btn.disabled) {
+                        btn.click();
+                        return btn.innerText.trim();
+                    }
+                    return null;
+                }
+            """)
+
+            await asyncio.sleep(2)
+
+            if sent:
                 print(f"Message sent to: {company_name}")
                 return True, company_name, company_url
-
-            return False, company_name, company_url
+            else:
+                print(f"Send failed: {company_name}")
+                return False, company_name, company_url
 
         except Exception as e:
             print(f"Send message error: {e}")
