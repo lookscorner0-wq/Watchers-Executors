@@ -16,11 +16,26 @@ SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
 
 MAX_ACTIONS_PER_RUN = 5
 
-KEYWORDS = [
-    "need lead generation",
-    "need chatbot",
-    "looking for automation",
-]
+def generate_keywords():
+    result = call_openai([
+        {"role": "system", "content": (
+            "You generate LinkedIn search keywords to find potential clients "
+            "for an AI Automation Agency offering: Lead Generation, Social Media "
+            "Marketing, AI Chatbots, Custom Workflows (N8N, Make, Zapier). "
+            "Generate exactly 3 short search keywords. "
+            "Each keyword must be 3-4 words MAXIMUM. "
+            "Keywords should find people LOOKING TO HIRE these services. "
+            "Reply ONLY as comma separated list. No explanation. No numbering. "
+            "Example: need chatbot built, hire automation expert, want AI agent"
+        )},
+        {"role": "user", "content": "Generate 3 fresh LinkedIn search keywords now."}
+    ], max_tokens=40, temperature=0.8)
+
+    keywords = [k.strip() for k in result.split(",") if k.strip()]
+    if len(keywords) < 3:
+        keywords = ["need lead generation", "need chatbot", "looking for automation"]
+    print(f"Keywords this run: {keywords}")
+    return keywords[:3]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
