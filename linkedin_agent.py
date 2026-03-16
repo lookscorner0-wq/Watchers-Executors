@@ -1,830 +1,540 @@
-# ═══════════════════════════════════════════════════════
-# linkedin_agent.py
-# NoError Agency — LinkedIn Agent
-# Watcher + Sender + Notifier — Sab Ek File
-# ═══════════════════════════════════════════════════════
+# ============================================================
+# linkedin_watcher.py
+# NoErrors AI Automation Agency — LinkedIn Watcher Agent
+# ============================================================
 
 import os
-import re
-import time
-import random
 import asyncio
-import sqlite3
-from datetime import datetime, timedelta
+import random
+import time
 import requests
 from playwright.async_api import async_playwright
 
-# ─────────────────────────────
-# ENV VARIABLES
-# ─────────────────────────────
-LI_AT         = os.environ["LI_AT"]
-LI_JSESSIONID = os.environ["LI_JSESSIONID"]
-OPENAI_KEY    = os.environ["OPENAI_KEY"]
-DB_FILE       = "agency.db"
+# ============================================================
+# CREDENTIALS
+# ============================================================
+LI_AT           = os.environ.get("LI_AT", "")
+LI_JSESSIONID   = os.environ.get("LI_JSESSIONID", "")
+OPENAI_KEY      = os.environ.get("OPENAI_KEY", "")
+SUPABASE_URL    = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY", "")
 
-MAX_MESSAGES_PER_RUN = 15
-WATCHER_INTERVAL     = 7200   # 2 ghante (seconds)
-NOTIFIER_INTERVAL    = 1800   # 30 minute (seconds)
+MAX_ACTIONS_PER_RUN = 10
 
-SYSTEM_PROMPT = (
-    "You are Bilal, a professional sales agent for NoError — a digital agency that works with clients globally. "
-    "You are a human sales representative. "
-    "If asked if you are AI say: I am part of the NoError sales team, for detailed questions I can connect you with our lead consultant directly. "
-    "HARD RULES: "
-    "1. NEVER share price in first or second message. "
-    "2. Keep first DM under 2 sentences only. "
-    "3. NEVER use markdown, bold, bullets, or any formatting. Plain text only. "
-    "4. NEVER mention price unless client asks multiple times. "
-    "5. When client asks for proof, use case studies naturally. "
-    "TONE: Main Client = casual friendly. GoodClient = professional. Opportunity = formal corporate zero emojis."
-)
-
-QUERIES = [
-    "AI Automation Expert",
-    "Social Media Marketing Manager",
-    "Chatbot Developer",
-    "Custom Flow Workflow Builder"
+# ============================================================
+# SEARCH KEYWORDS
+# ============================================================
+KEYWORDS = [
+    "need lead generation",
+    "looking for automation",
+    "need chatbot",
+    "want AI agent",
+    "hire marketing agency",
+    "need social media manager",
+    "looking for web automation",
+    "need workflow automation",
+    "AI automation help",
+    "need outreach automation",
 ]
 
-# ═══════════════════════════════════════════════════════
-# DATABASE
-# ═══════════════════════════════════════════════════════
-def get_connection():
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+# ============================================================
+# USER AGENTS ROTATION (Windows, Mac, Linux)
+# ============================================================
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 Version/16.0 Safari/605.1.15",
+]
 
-def is_seen(url):
-    conn = get_connection()
-    row  = conn.execute("SELECT id FROM seen_urls WHERE url = ?", (url,)).fetchone()
-    conn.close()
-    return row is not None
+# ============================================================
+# SYSTEM PROMPT — Bilal Dev Brain
+# ============================================================
+SYSTEM_PROMPT = """
+You are Bilal Dev, sales manager for NoErrors — an AI Automation Agency.
+Your role is to find potential clients on LinkedIn who need our services and convert them through smart, human, non-salesy conversation.
 
-def mark_seen(url):
-    conn = get_connection()
-    conn.execute("INSERT OR IGNORE INTO seen_urls (url) VALUES (?)", (url,))
-    conn.commit()
-    conn.close()
+SERVICES WE OFFER:
+1. Lead Generation (AI-powered outreach, LinkedIn automation, email campaigns, B2B database scraping)
+2. Social Media Content Marketing (AI content calendar, auto-posting, LinkedIn/Instagram/Facebook/TikTok)
+3. AI Chatbots and Agents (customer support bots, appointment bots, WhatsApp bots, website chatbots)
+4. Custom Workflows (N8N, Make, Zapier, Pabbly automation setup and management)
 
-def save_lead(data):
-    conn = get_connection()
-    conn.execute("""
-        INSERT OR IGNORE INTO leads
-        (title, description, location, job_condition,
-         client_type, profile_url, apply_url, job_time, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-    """, (
-        data.get("title", ""),
-        data.get("description", ""),
-        data.get("location", ""),
-        data.get("job_condition", ""),
-        data.get("client_type", "Main Client"),
-        data.get("profile_url", ""),
-        data.get("apply_url", ""),
-        data.get("job_time", "")
-    ))
-    conn.commit()
-    conn.close()
+CLIENT TYPES:
+- Main Client: Small business, solo founder, startup — casual friendly tone, curiosity hooks, humor allowed, emojis allowed
+- GoodClient: Growing company, SaaS, agency, mid-size — professional but warm, mirror their technical language, free audit offer works well
+- Opportunity: Enterprise, Fortune, multinational, large corporation — zero emojis, formal tone, lead with credibility and case study, push for discovery call always
 
-def get_pending_leads():
-    conn = get_connection()
-    rows = conn.execute("SELECT * FROM leads WHERE status = 'pending' LIMIT 20").fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+HOW TO CLASSIFY CLIENT:
+- Opportunity: words like enterprise, fortune, global, multinational, 100 plus employees, corporate
+- GoodClient: words like startup, SaaS, growing, series A, scale up, agency
+- Main Client: everything else
 
-def get_followup_leads():
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT * FROM leads
-        WHERE status = 'sent'
-        AND created_at <= datetime('now', '-3 days')
-    """).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+HARD RULES — NEVER BREAK THESE:
+1. NEVER share price in first or second message
+2. NEVER sound salesy — always sound helpful and specific
+3. NEVER use markdown, bold, bullets, or formatting in messages — plain text only
+4. NEVER reveal you are an AI — if asked, say: I am part of the NoErrors sales team, for detailed technical questions I can connect you with our lead consultant directly
+5. NEVER mention services the client did not ask for in first message
+6. NEVER promise a delivery timeline before scoping the project
+7. NEVER reveal team size — say: we are a focused specialist team, quality over quantity
+8. NEVER give price to Opportunity client — always push for discovery call
+9. NEVER send more than 180 characters in first outreach message
+10. NEVER use emojis with Opportunity clients
+11. NEVER agree to free trial — offer free audit instead
+12. NEVER compete on price — compete on value and ROI
 
-def update_lead_status(profile_url, status):
-    conn = get_connection()
-    conn.execute("UPDATE leads SET status = ? WHERE profile_url = ?", (status, profile_url))
-    conn.commit()
-    conn.close()
+WHAT WORKS — ALWAYS DO THESE:
+1. Mirror exact technical language from their post or job description
+2. Frame hook around what client is LOSING not what we offer
+3. Include a specific result number in hook when possible (e.g. saved 15 hours per week)
+4. For Main Client — use curiosity question hook with casual tone
+5. For GoodClient — lead with free audit offer, it removes all hesitation
+6. For Opportunity — open with enterprise client reference and specific result achieved
+7. Follow up within 24 hours of connection accept
+8. After ghost for 24 hours — send one short casual message: Hey, just checking if you had a chance to review — worth a 5 min chat?
+9. After mid-conversation ghost — wait 48 hours then send one final non-pushy message
+10. When client asks why us — answer with specific result: we automated X for similar business and saved Y hours per week
+11. When client changes scope — say: let us lock the core requirement first before expanding scope
+12. When client says they will handle internally — say: most clients said that before realizing the time and cost of doing it alone
+13. When client mentions negative review — address calmly with case study evidence, never panic
+14. When client asks complex technical question — say: great question, let me confirm exact specs with our technical lead and get back to you
+15. When client asks for references — redirect to case study outcomes, never say no references
+16. When client asks team size or company age — say: we are a focused specialist team, our results matter more than headcount
+17. When client demands free trial — counter with: we do not offer free trials but we can do a free audit of your current setup
+18. For slow responding client — maximum one follow up every 3 days, never be aggressive
+19. For low budget client — offer smaller starter package, never reduce core price, anchor value first
+20. For multi-service request — focus on single biggest pain point first, other services come after trust builds
+
+SIGNAL DETECTION:
+- Green: client says yes, interested, lets talk, sounds good, how much, tell me more, great, sure
+- Red: client says no thanks, not interested, already hired, not looking
+- Yellow: client asks about legal, NDA, references
+
+CASE STUDY TRIGGER:
+If client asks for proof, results, portfolio, past work, examples, references, or says have you done this before — you must say:
+"Absolutely — let me share what we delivered for a similar client. [INSERT CASE STUDY HERE]"
+Then use the most relevant case study based on their service need.
+
+CONVERSATION GOAL:
+- First message: spark curiosity, never pitch
+- Second message: understand their exact need
+- Third message: position our solution with a result number
+- Fourth message: push for WhatsApp call or discovery call
+- If client agrees to WhatsApp: collect their number, notify manager agent
+
+OUTPUT FORMAT FOR COMMENTS:
+- Plain text only
+- Maximum 180 characters for first outreach
+- No hashtags in comments
+- End with a soft question to open conversation
+
+OUTPUT FORMAT FOR DMs:
+- Plain text only
+- First DM maximum 2 sentences
+- Never start with "Hi I am Bilal" — start with their pain point
+"""
+
+# ============================================================
+# SUPABASE HELPERS
+# ============================================================
+def supabase_insert(table, data):
+    try:
+        res = requests.post(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={
+                "apikey":        SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type":  "application/json",
+                "Prefer":        "return=minimal"
+            },
+            json=data,
+            timeout=10
+        )
+        return res.status_code in [200, 201]
+    except Exception as e:
+        print(f"Supabase insert error: {e}")
+        return False
 
 def is_already_contacted(profile_url):
-    conn = get_connection()
-    row  = conn.execute(
-        "SELECT id FROM conversations WHERE profile_url = ?", (profile_url,)
-    ).fetchone()
-    conn.close()
-    return row is not None
-
-def save_conversation(data):
-    conn = get_connection()
-    conn.execute("""
-        INSERT INTO conversations
-        (profile_url, company_name, role, message, signal)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        data.get("profile_url", ""),
-        data.get("company_name", ""),
-        data.get("role", "bilal"),
-        data.get("message", ""),
-        data.get("signal", None)
-    ))
-    conn.commit()
-    conn.close()
-
-def get_conversation_history(profile_url):
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT role, message FROM conversations
-        WHERE profile_url = ?
-        ORDER BY created_at ASC
-    """, (profile_url,)).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def update_conversation_signal(profile_url, signal):
-    conn = get_connection()
-    conn.execute(
-        "UPDATE conversations SET signal = ? WHERE profile_url = ?",
-        (signal, profile_url)
-    )
-    conn.commit()
-    conn.close()
-
-def save_memory(data):
-    conn = get_connection()
-    conn.execute("""
-        INSERT INTO memory
-        (client_type, signal, what_failed, better_response, emotion_tone)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        data.get("client_type", "Main Client"),
-        data.get("signal", ""),
-        data.get("what_failed", ""),
-        data.get("better_response", ""),
-        data.get("emotion_tone", "")
-    ))
-    conn.commit()
-    conn.close()
-
-def save_context(data):
-    conn = get_connection()
-    conn.execute("""
-        INSERT INTO context
-        (situation, bilal_response, client_reaction, lesson, what_worked)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        data.get("situation", ""),
-        data.get("bilal_response", ""),
-        data.get("client_reaction", ""),
-        data.get("lesson", ""),
-        data.get("what_worked", "")
-    ))
-    conn.commit()
-    conn.close()
-
-# ═══════════════════════════════════════════════════════
-# BRAIN
-# ═══════════════════════════════════════════════════════
-def build_brain():
-    brain = ""
     try:
-        conn         = get_connection()
-        memory_rows  = conn.execute("SELECT * FROM memory  ORDER BY created_at DESC LIMIT 30").fetchall()
-        context_rows = conn.execute("SELECT * FROM context ORDER BY created_at DESC LIMIT 30").fetchall()
-        case_rows    = conn.execute("SELECT * FROM case_studies").fetchall()
-        conn.close()
+        res = requests.get(
+            f"{SUPABASE_URL}/rest/v1/conversations",
+            headers={
+                "apikey":        SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            params={"profile_url": f"eq.{profile_url}", "select": "conv_id"},
+            timeout=10
+        )
+        return len(res.json()) > 0
+    except:
+        return False
 
-        if memory_rows:
-            brain += "\n\nPAST LESSONS:\n"
-            for r in memory_rows:
-                if r["what_failed"] and r["what_failed"].lower() != "nothing failed":
-                    brain += f"- [{r['client_type']}][{r['signal']}] Failed: {r['what_failed']} | Better: {r['better_response']}\n"
+def get_case_studies(service_type):
+    try:
+        res = requests.get(
+            f"{SUPABASE_URL}/rest/v1/case_studies",
+            headers={
+                "apikey":        SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            params={"service_type": f"ilike.%{service_type}%", "select": "*", "limit": "3"},
+            timeout=10
+        )
+        cases = res.json()
+        if not cases:
+            return ""
+        result = ""
+        for c in cases:
+            result += f"Client: {c.get('client_name')} | Service: {c.get('service')} | Problem: {c.get('problem')} | Result: {c.get('results')} | Review: {c.get('review')}\n"
+        return result
+    except:
+        return ""
 
-        if context_rows:
-            brain += "\n\nPAST CONVERSATIONS:\n"
-            for r in context_rows:
-                brain += (
-                    f"- Situation: {r['situation']}\n"
-                    f"  Bilal said: {r['bilal_response']}\n"
-                    f"  Client reacted: {r['client_reaction']}\n"
-                    f"  Lesson: {r['lesson']} | Worked: {r['what_worked']}\n"
-                )
-
-        if case_rows:
-            brain += "\n\nCASE STUDIES:\n"
-            for r in case_rows:
-                brain += (
-                    f"- Client: {r['client_name']} | Service: {r['service']}\n"
-                    f"  Problem: {r['problem']}\n"
-                    f"  Results: {r['results']}\n"
-                    f"  Review: {r['review']}\n"
-                )
-
-        print(f"Brain ready — Memory: {len(memory_rows)} | Context: {len(context_rows)} | Cases: {len(case_rows)}")
-
+# ============================================================
+# GPT-4o-mini HELPERS
+# ============================================================
+def call_openai(messages, max_tokens=150, temperature=0.5):
+    try:
+        res = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}"},
+            json={
+                "model":       "gpt-4o-mini",
+                "messages":    messages,
+                "max_tokens":  max_tokens,
+                "temperature": temperature
+            },
+            timeout=30
+        )
+        return res.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"Brain error: {e}")
+        print(f"OpenAI error: {e}")
+        return ""
 
-    return brain
-
-# ═══════════════════════════════════════════════════════
-# AI
-# ═══════════════════════════════════════════════════════
-def call_openai(payload, retries=3):
-    for attempt in range(retries):
-        try:
-            res = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-                json=payload,
-                timeout=30
-            )
-            if res.status_code == 429:
-                wait = 2 ** attempt
-                print(f"Rate limited — waiting {wait}s")
-                time.sleep(wait)
-                continue
-            return res
-        except Exception as e:
-            print(f"OpenAI error: {e}")
-    return None
-
-def get_client_type(description):
-    desc = description.lower()
-    if any(x in desc for x in ["enterprise", "fortune", "global leader", "multinational"]):
+def get_client_type(text):
+    text = text.lower()
+    if any(x in text for x in ["enterprise", "fortune", "global", "multinational", "corporate"]):
         return "Opportunity"
-    if any(x in desc for x in ["startup", "growing", "series a", "saas", "scale up"]):
+    if any(x in text for x in ["startup", "saas", "growing", "series a", "scale up", "agency"]):
         return "GoodClient"
     return "Main Client"
 
-def qualify_job(title, description):
-    try:
-        res = call_openai({
-            "model":       "gpt-4o-mini",
-            "messages":    [
-                {"role": "system", "content": (
-                    "You are a lead qualification expert. "
-                    "RELEVANT: company looking to outsource digital/tech/marketing work. "
-                    "NOT RELEVANT: employee hiring only. "
-                    "Reply ONLY: relevant: yes OR relevant: no"
-                )},
-                {"role": "user", "content": f"Title: {title}\nDescription: {description[:300]}"}
-            ],
-            "temperature": 0.1,
-            "max_tokens":  10
-        })
-        answer = res.json()["choices"][0]["message"]["content"].strip().lower()
-        return "relevant: yes" in answer
-    except Exception as e:
-        print(f"Qualify error: {e}")
-        return True
+def is_relevant(post_text):
+    result = call_openai([
+        {"role": "system", "content": "You are a lead qualification expert for an AI Automation Agency. Reply ONLY: relevant: yes OR relevant: no"},
+        {"role": "user",   "content": f"Is this post from someone who might need AI automation, chatbots, lead generation, or workflow automation services?\n\nPost: {post_text[:300]}"}
+    ], max_tokens=10, temperature=0.1)
+    return "relevant: yes" in result.lower()
 
-def generate_hook(lead, brain):
-    try:
-        client_type = lead.get("client_type", "Main Client")
-        temp        = 0.3 if client_type == "Opportunity" else 0.5 if client_type == "GoodClient" else 0.7
+def detect_proof_request(text):
+    triggers = ["proof", "results", "case study", "portfolio", "past work",
+                "examples", "references", "have you done", "show me your work",
+                "previous clients", "experience"]
+    return any(t in text.lower() for t in triggers)
 
-        res  = call_openai({
-            "model":    "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT + brain},
-                {"role": "user",   "content": (
-                    f"Title: {lead.get('title', '')}\n"
-                    f"Description: {lead.get('description', '')[:300]}\n"
-                    f"Client Type: {client_type}\n"
-                    f"Write LinkedIn DM. Max 190 chars. Pain point first. Soft CTA. No price. Plain text only."
-                )}
-            ],
-            "temperature": temp,
-            "max_tokens":  100
-        })
-        note = res.json()["choices"][0]["message"]["content"].strip()
-        note = note.replace("**", "").replace("*", "").replace("#", "").replace("\n", " ")
-        if len(note) > 190:
-            note = note[:187] + "..."
-        return note
-    except Exception as e:
-        print(f"Hook error: {e}")
-        return "Saw you need help scaling — we have done this for similar businesses. Worth a quick chat?"
-
-def generate_dm(history, brain):
-    try:
-        history_text    = ""
-        last_client_msg = ""
-        for msg in history:
-            role          = "Bilal" if msg["role"] == "bilal" else "Client"
-            history_text += f"{role}: {msg['message']}\n"
-        for msg in reversed(history):
-            if msg["role"] == "client":
-                last_client_msg = msg["message"]
-                break
-
-        res   = call_openai({
-            "model":    "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT + brain},
-                {"role": "user",   "content": (
-                    f"Conversation:\n{history_text}\n\n"
-                    f"Client just said: {last_client_msg}\n\n"
-                    f"Max 3 sentences. Human tone. No price. Plain text only. Output ONLY the reply."
-                )}
-            ],
-            "temperature": 0.5,
-            "max_tokens":  150
-        })
-        reply = res.json()["choices"][0]["message"]["content"].strip()
-        reply = reply.replace("**", "").replace("*", "").replace("#", "").replace("\n", " ")
-        return reply
-    except Exception as e:
-        print(f"DM error: {e}")
-        return "Thanks for your message! Could you tell me more about what you need?"
-
-def determine_signal(message):
-    msg = message.lower()
-    if any(x in msg for x in ["yes", "interested", "lets talk", "sounds good",
-                                "how much", "tell me more", "great", "sure"]):
+def detect_signal(text):
+    text = text.lower()
+    if any(x in text for x in ["yes", "interested", "lets talk", "sounds good", "how much", "tell me more", "great", "sure", "okay"]):
         return "Green"
-    if any(x in msg for x in ["no thanks", "not interested", "already hired", "not looking"]):
+    if any(x in text for x in ["no thanks", "not interested", "already hired", "not looking"]):
         return "Red"
-    if any(x in msg for x in ["contract", "legal", "nda", "registration"]):
+    if any(x in text for x in ["contract", "legal", "nda", "proof", "portfolio", "references", "past work"]):
         return "Yellow"
     return None
 
-# ═══════════════════════════════════════════════════════
-# BROWSER HELPERS
-# ═══════════════════════════════════════════════════════
-def get_browser_args():
-    return {
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        "viewport":   {"width": 1366, "height": 768}
-    }
+def generate_comment(post_text, client_type):
+    temp = 0.7 if client_type == "Main Client" else 0.4
+    comment = call_openai([
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": (
+            f"Write a LinkedIn comment for this post. Client type: {client_type}.\n"
+            f"Post: {post_text[:300]}\n\n"
+            f"Rules: Plain text only. Maximum 180 chars. "
+            f"End with soft question. No hashtags. No emojis for Opportunity."
+        )}
+    ], max_tokens=80, temperature=temp)
+    comment = comment.replace("**","").replace("*","").replace("#","").replace("\n"," ")
+    return comment[:180] if len(comment) > 180 else comment
 
+def generate_dm(post_text, client_type, case_studies=""):
+    extra = f"\n\nRelevant case studies:\n{case_studies}" if case_studies else ""
+    temp  = 0.3 if client_type == "Opportunity" else 0.5
+    dm = call_openai([
+        {"role": "system", "content": SYSTEM_PROMPT + extra},
+        {"role": "user",   "content": (
+            f"Write a LinkedIn DM for this post. Client type: {client_type}.\n"
+            f"Post: {post_text[:300]}\n\n"
+            f"Rules: Plain text only. Max 2 sentences. "
+            f"Start with their pain point. No price. No emojis for Opportunity."
+        )}
+    ], max_tokens=100, temperature=temp)
+    return dm.replace("**","").replace("*","").replace("#","").replace("\n"," ")
+
+# ============================================================
+# BROWSER SETUP
+# ============================================================
 def get_cookies():
     return [
         {"name": "li_at",      "value": LI_AT,                "domain": ".linkedin.com",     "path": "/"},
         {"name": "JSESSIONID", "value": f'"{LI_JSESSIONID}"', "domain": ".www.linkedin.com", "path": "/"},
+        {"name": "liap",       "value": "true",               "domain": ".linkedin.com",     "path": "/"},
+        {"name": "lang",       "value": "v=2&lang=en-us",     "domain": ".linkedin.com",     "path": "/"},
     ]
 
 async def human_type(element, text):
     for char in text:
-        await element.type(char, delay=random.uniform(80, 160))
-        if random.random() < 0.08:
-            await asyncio.sleep(random.uniform(0.2, 0.6))
+        await element.type(char, delay=random.randint(80, 160))
+        if random.random() < 0.05:
+            await asyncio.sleep(random.uniform(0.2, 0.5))
 
-# ═══════════════════════════════════════════════════════
-# WATCHER — Nai jobs dhundo
-# ═══════════════════════════════════════════════════════
-def get_session():
-    s = requests.Session()
-    s.headers.update({
-        "accept":                         "application/vnd.linkedin.normalized+json+2.1",
-        "csrf-token":                     LI_JSESSIONID,
-        "user-agent":                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/109.0.0.0 Safari/537.36",
-        "x-li-lang":                      "en_US",
-        "x-restli-protocol-version":      "2.0.0",
-        "x-li-deco-include-micro-schema": "true",
-        "cookie":                         f'JSESSIONID="{LI_JSESSIONID}"; li_at={LI_AT}'
-    })
-    return s
-
-def search_jobs(query, s):
+# ============================================================
+# COMMENT ON PERSONAL POST
+# ============================================================
+async def comment_on_post(page, card, comment_text):
     try:
-        kw  = query.replace(" ", "%20")
-        url = (
-            "https://www.linkedin.com/voyager/api/voyagerJobsDashJobCards"
-            "?decorationId=com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollectionLite-88"
-            "&count=5&q=jobSearch"
-            f"&query=(origin:JOBS_HOME_SEARCH_BUTTON,keywords:{kw},locationUnion:(geoId:92000000),spellCorrectionEnabled:true)"
-            "&servedEventEnabled=false&start=0&f_TPR=r259200"
-        )
-        res   = s.get(url)
-        data  = res.json()
-        cards = data.get("data", {}).get("metadata", {}).get("jobCardPrefetchQueries", [])
-        ids   = []
-        for card in cards:
-            for key in card.get("prefetchJobPostingCard", {}).keys():
-                match = re.search(r'\((\d+),', key)
-                if match:
-                    ids.append(match.group(1))
-        print(f"Search '{query}': {len(ids)} jobs")
-        return ids
-    except Exception as e:
-        print(f"Search error: {e}")
-        return []
-
-def get_job_data(job_id, s):
-    try:
-        time.sleep(random.uniform(2, 4))
-        res = s.get(
-            f"https://www.linkedin.com/voyager/api/jobs/jobPostings/{job_id}",
-            headers={
-                "accept":                    "application/vnd.linkedin.normalized+json+2.1",
-                "csrf-token":                LI_JSESSIONID,
-                "user-agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/109.0.0.0 Safari/537.36",
-                "x-restli-protocol-version": "2.0.0",
-                "cookie":                    f'JSESSIONID="{LI_JSESSIONID}"; li_at={LI_AT}'
-            }
-        )
-        if res.status_code != 200:
-            return None
-
-        raw   = res.json()
-        data  = raw.get("data", {})
-        title = data.get("title", "")
-        if not title:
-            return None
-
-        listed_at = data.get("listedAt", "")
-        job_time  = ""
-        if listed_at:
-            posted = datetime.fromtimestamp(int(listed_at) / 1000)
-            diff   = datetime.now() - posted
-            if diff > timedelta(hours=72):
-                print(f"Too old — skip!")
-                return None
-            job_time = posted.strftime("%H:%M")
-
-        apply    = data.get("applyMethod", {})
-        atype    = apply.get("$type", "")
-        external = apply.get("companyApplyUrl", "") if "OffsiteApply"       in atype else ""
-        easy     = apply.get("easyApplyUrl",    "") if "ComplexOnsiteApply" in atype else ""
-
-        location = data.get("formattedLocation", "")
-        if data.get("workRemoteAllowed") and "remote" not in location.lower():
-            location = f"Remote ({location})" if location else "Remote"
-
-        emp           = data.get("employmentStatus", "")
-        job_condition = ""
-        if emp:
-            type_map = {
-                "FULL_TIME": "Full Time", "PART_TIME": "Part Time",
-                "CONTRACT":  "Contract",  "TEMPORARY": "Temporary",
-                "INTERNSHIP":"Internship","OTHER":     "Other"
-            }
-            job_condition = type_map.get(emp.split(":")[-1], "")
-
-        return {
-            "title":         title,
-            "description":   data.get("description", {}).get("text", "")[:300],
-            "location":      location,
-            "job_condition": job_condition,
-            "job_time":      job_time,
-            "profile_url":   data.get("jobPostingUrl", f"https://www.linkedin.com/jobs/view/{job_id}/"),
-            "apply_url":     external if external else easy
-        }
-    except Exception as e:
-        print(f"Job data error: {e}")
-        return None
-
-def run_watcher():
-    print(f"\n{'='*50}\nWatcher Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*50}")
-    s = get_session()
-    for query in QUERIES:
-        time.sleep(random.uniform(3, 6))
-        for job_id in search_jobs(query, s):
-            url = f"https://www.linkedin.com/jobs/view/{job_id}/"
-            if is_seen(url):
-                continue
-            data = get_job_data(job_id, s)
-            if not data:
-                continue
-            if not qualify_job(data["title"], data["description"]):
-                mark_seen(url)
-                continue
-            data["client_type"] = get_client_type(data["description"])
-            save_lead(data)
-            mark_seen(url)
-            time.sleep(random.uniform(1, 3))
-    print(f"Watcher Done: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-# ═══════════════════════════════════════════════════════
-# SENDER — Messages bhejo
-# ═══════════════════════════════════════════════════════
-async def send_message_to_company(page, job_url, note):
-    try:
-        await page.goto(job_url, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(4, 6))
-        await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-
-        company_url = await page.evaluate("""
-            () => {
-                const links   = Array.from(document.querySelectorAll('a'));
-                const company = links.find(l =>
-                    l.href.includes('/company/') && l.innerText.trim().length > 0
-                );
-                if (!company) return null;
-                let url = company.href.split('?')[0];
-                ['/life','/about','/jobs','/people','/posts'].forEach(s => {
-                    if (url.includes(s)) url = url.substring(0, url.indexOf(s));
-                });
-                while (url.endsWith('/')) url = url.slice(0, -1);
-                return url + '/';
-            }
-        """)
-
-        if not company_url:
-            return False, None, None
-
-        company_name = company_url.split('/company/')[1].replace('/', '').strip()
-        await page.goto(company_url, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(4, 6))
-
-        clicked = await page.evaluate("""
-            () => {
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => b.innerText.trim() === 'Message' || b.innerText.trim() === 'Send message');
-                if (btn) { btn.click(); return true; }
-                return false;
-            }
-        """)
-
-        if not clicked:
-            return False, company_name, company_url
-
-        await asyncio.sleep(random.uniform(4, 6))
-
-        msg_box = (
-            await page.query_selector('textarea.artdeco-text-input--input') or
-            await page.query_selector('textarea')
-        )
-        if not msg_box:
-            return False, company_name, company_url
-
-        await msg_box.click()
-        await asyncio.sleep(random.uniform(1, 2))
-        await human_type(msg_box, note)
+        await card.scroll_into_view_if_needed()
         await asyncio.sleep(random.uniform(2, 3))
 
-        sent = await page.evaluate("""
-            () => {
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => (b.innerText.trim() === 'Send message' || b.innerText.trim() === 'Send') && !b.disabled);
-                if (btn) { btn.click(); return true; }
-                return false;
-            }
-        """)
-
-        await asyncio.sleep(2)
-        if sent:
-            print(f"Message sent: {company_name}")
-        return sent, company_name, company_url
-
-    except Exception as e:
-        print(f"Send error: {e}")
-        return False, None, None
-
-async def send_cold_followup(page, profile_url, company_name):
-    msg = "Hey, just checking if you had a chance to review my message — worth a 5 min chat?"
-    try:
-        await page.goto(profile_url, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(5, 8))
-
-        clicked = await page.evaluate("""
-            () => {
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => b.innerText.trim() === 'Message' || b.innerText.trim() === 'Send message');
-                if (btn) { btn.click(); return true; }
-                return false;
-            }
-        """)
-        if not clicked:
+        comment_btn = await card.query_selector(
+            'button[aria-label*="comment"], button:has-text("Comment")'
+        )
+        if not comment_btn:
             return False
 
-        await asyncio.sleep(random.uniform(3, 5))
-        msg_box = await page.query_selector('textarea') or await page.query_selector('textarea.artdeco-text-input--input')
-        if not msg_box:
-            return False
-
-        await msg_box.click()
-        await human_type(msg_box, msg)
+        await comment_btn.click()
         await asyncio.sleep(random.uniform(2, 3))
 
-        sent = await page.evaluate("""
-            () => {
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => (b.innerText.trim() === 'Send' || b.innerText.trim() === 'Send message') && !b.disabled);
-                if (btn) { btn.click(); return true; }
-                return false;
-            }
-        """)
-        await asyncio.sleep(2)
-        return sent
+        comment_box = await page.query_selector('div.ql-editor, div[contenteditable="true"]')
+        if not comment_box:
+            return False
+
+        await comment_box.click()
+        await asyncio.sleep(1)
+        await human_type(comment_box, comment_text)
+        await asyncio.sleep(random.uniform(2, 3))
+
+        submit_btn = await page.query_selector('button.comments-comment-box__submit-button')
+        if not submit_btn:
+            await comment_box.press("Control+Return")
+        else:
+            await submit_btn.click()
+
+        await asyncio.sleep(3)
+        print(f"  Comment posted!")
+        return True
+
     except Exception as e:
-        print(f"Followup error: {e}")
+        print(f"  Comment error: {e}")
         return False
 
-async def run_sender(page, brain):
-    print(f"\n{'='*50}\nSender Start\n{'='*50}")
-    leads      = get_pending_leads()
-    sent_count = 0
-
-    for lead in leads:
-        if sent_count >= MAX_MESSAGES_PER_RUN:
-            break
-
-        job_url = lead.get("profile_url", "")
-        if not job_url:
-            continue
-        if is_already_contacted(job_url):
-            update_lead_status(job_url, "sent")
-            continue
-
-        note    = generate_hook(lead, brain)
-        success, company_name, company_url = await send_message_to_company(page, job_url, note)
-
-        if success:
-            sent_count += 1
-            save_conversation({
-                "profile_url":  company_url or job_url,
-                "company_name": company_name or "",
-                "role":         "bilal",
-                "message":      note
-            })
-            update_lead_status(job_url, "sent")
-            await asyncio.sleep(random.uniform(15, 30))
-        else:
-            await asyncio.sleep(random.uniform(5, 10))
-
-    # Cold followups
-    print("\n--- Cold Followups ---")
-    for lead in get_followup_leads():
-        url  = lead.get("profile_url", "")
-        name = lead.get("title", "")
-        if url:
-            success = await send_cold_followup(page, url, name)
-            if success:
-                update_lead_status(url, "followup_sent")
-            await asyncio.sleep(random.uniform(15, 30))
-
-# ═══════════════════════════════════════════════════════
-# NOTIFIER — Replies check karo
-# ═══════════════════════════════════════════════════════
-async def process_reply(page, conv_url, brain):
+# ============================================================
+# DM ON COMPANY PAGE
+# ============================================================
+async def dm_company(page, profile_url, dm_text):
     try:
-        await page.goto(conv_url, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(5, 8))
-        await page.mouse.move(random.randint(200, 600), random.randint(200, 500))
-        await asyncio.sleep(random.uniform(1, 3))
+        await page.goto(profile_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(4, 6))
 
-        sender_profile_url = await page.evaluate("""
-            () => {
-                const link = document.querySelector(
-                    '.msg-thread__link-to-profile, a[href*="/in/"], a[href*="/company/"]'
-                );
-                return link ? link.href.split('?')[0] : null;
-            }
-        """)
+        msg_btn = await page.query_selector('button:has-text("Message"), a:has-text("Message")')
+        if not msg_btn:
+            dots = await page.query_selector('button[aria-label*="More"]')
+            if dots:
+                await dots.click()
+                await asyncio.sleep(2)
+                msg_btn = await page.query_selector('li:has-text("Message"), div:has-text("Send message")')
 
-        sender_name = await page.evaluate("""
-            () => {
-                const el = document.querySelector(
-                    '.msg-entity-lockup__entity-title, .msg-thread__participant-name'
-                );
-                return el ? el.innerText.trim() : null;
-            }
-        """)
+        if not msg_btn:
+            return False
 
-        page_messages = await page.evaluate("""
-            () => {
-                return Array.from(document.querySelectorAll('.msg-s-message-list__event'))
-                    .map(m => ({
-                        role:    m.querySelector('.msg-s-message-group__name') ? 'client' : 'bilal',
-                        message: m.querySelector('.msg-s-event-listitem__body')?.innerText.trim() || ''
-                    }))
-                    .filter(m => m.message);
-            }
-        """)
+        await msg_btn.click()
+        await asyncio.sleep(random.uniform(3, 4))
 
-        if not page_messages:
-            return
+        # Handle topic dropdown if present
+        topic_dropdown = await page.query_selector('select, div[aria-label*="topic"]')
+        if topic_dropdown:
+            await topic_dropdown.click()
+            await asyncio.sleep(1)
+            first_option = await page.query_selector('option:not([value=""]), li[role="option"]')
+            if first_option:
+                await first_option.click()
+            await asyncio.sleep(1)
 
-        last_client_msg = ""
-        for msg in reversed(page_messages):
-            if msg["role"] == "client":
-                last_client_msg = msg["message"]
-                break
+        msg_box = await page.query_selector('textarea, div[contenteditable="true"]')
+        if not msg_box:
+            return False
 
-        if not last_client_msg:
-            return
+        await msg_box.click()
+        await asyncio.sleep(1)
+        await human_type(msg_box, dm_text)
+        await asyncio.sleep(random.uniform(2, 3))
 
-        print(f"Reply from {sender_name}: {last_client_msg[:60]}")
-
-        signal  = determine_signal(last_client_msg)
-        history = get_conversation_history(sender_profile_url) or page_messages
-        reply   = generate_dm(history, brain)
-
-        await asyncio.sleep(random.uniform(3, 6))
-        msg_box = (
-            await page.query_selector('div.msg-form__contenteditable') or
-            await page.query_selector('div[role="textbox"]') or
-            await page.query_selector('div[contenteditable="true"]')
-        )
-
-        if msg_box:
-            await msg_box.click()
-            await asyncio.sleep(random.uniform(1, 2))
-            await human_type(msg_box, reply)
-            await asyncio.sleep(random.uniform(2, 4))
-            await page.evaluate("""
-                () => {
-                    const btn = Array.from(document.querySelectorAll('button'))
-                        .find(b => b.innerText.trim() === 'Send' || b.getAttribute('type') === 'submit');
-                    if (btn) btn.click();
-                }
-            """)
+        send_btn = await page.query_selector('button:has-text("Send message"), button:has-text("Send")')
+        if send_btn:
+            await send_btn.click()
             await asyncio.sleep(2)
-            print(f"Reply sent!")
+            print(f"  DM sent!")
+            return True
 
-            save_conversation({"profile_url": sender_profile_url, "company_name": sender_name, "role": "client",  "message": last_client_msg, "signal": signal})
-            save_conversation({"profile_url": sender_profile_url, "company_name": sender_name, "role": "bilal",   "message": reply})
-
-            if signal == "Green":
-                update_lead_status(sender_profile_url, "warm")
-                save_context({
-                    "situation":       f"Client replied positively — {sender_name}",
-                    "bilal_response":  reply,
-                    "client_reaction": last_client_msg,
-                    "lesson":          "Positive response",
-                    "what_worked":     "Client engaged"
-                })
-            elif signal == "Red":
-                update_lead_status(sender_profile_url, "missed")
-                save_memory({
-                    "client_type":     "Main Client",
-                    "signal":          "Red",
-                    "what_failed":     last_client_msg[:100],
-                    "better_response": "Review conversation before rejection",
-                    "emotion_tone":    "Cold"
-                })
-            elif signal == "Yellow":
-                update_lead_status(sender_profile_url, "warm")
-                update_conversation_signal(sender_profile_url, "Yellow")
-                print(f"YELLOW ALERT: {last_client_msg[:100]}")
+        return False
 
     except Exception as e:
-        print(f"Process reply error: {e}")
+        print(f"  DM error: {e}")
+        return False
 
-async def run_notifier(page, brain):
-    print(f"\n{'='*50}\nNotifier Start\n{'='*50}")
-    try:
-        await page.goto("https://www.linkedin.com/messaging/", wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(5, 8))
-
-        conversations = await page.evaluate("""
-            () => {
-                return Array.from(document.querySelectorAll('.msg-conversation-listitem'))
-                    .filter(c => c.querySelector('.msg-conversation-listitem__unread-count'))
-                    .map(c => c.querySelector('a')?.href)
-                    .filter(Boolean);
-            }
-        """)
-
-        print(f"Unread: {len(conversations)}")
-        for conv_url in conversations:
-            await process_reply(page, conv_url, brain)
-            await asyncio.sleep(random.uniform(20, 40))
-
-    except Exception as e:
-        print(f"Notifier error: {e}")
-
-# ═══════════════════════════════════════════════════════
-# MAIN LOOP
-# ═══════════════════════════════════════════════════════
-async def main():
-    print(f"\n{'='*50}\nLinkedIn Agent Starting\n{'='*50}")
-
-    last_watcher_run = 0  # Pehli baar turant chalega
+# ============================================================
+# MAIN WATCHER
+# ============================================================
+async def run_watcher():
+    print(f"\n{'='*50}")
+    print(f"LinkedIn Watcher Started")
+    print(f"{'='*50}\n")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(**get_browser_args())
+        context = await browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport={"width": 1366, "height": 768}
+        )
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         await context.add_cookies(get_cookies())
         page = await context.new_page()
 
+        # Login check
         await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(3, 5))
+        await asyncio.sleep(3)
+        if "feed" not in page.url:
+            print("Session expired — refresh cookies!")
+            await browser.close()
+            return
 
-        while True:
-            now   = time.time()
-            brain = build_brain()
+        print("Session valid!\n")
+        actions_done = 0
 
-            # Watcher + Sender — har 2 ghante
-            if now - last_watcher_run >= WATCHER_INTERVAL:
-                print("\nWatcher + Sender time!")
-                run_watcher()
-                await run_sender(page, brain)
-                last_watcher_run = time.time()
+        for keyword in KEYWORDS:
+            if actions_done >= MAX_ACTIONS_PER_RUN:
+                break
 
-            # Notifier — har 30 minute
-            print("\nNotifier time!")
-            await run_notifier(page, brain)
+            print(f"Searching: '{keyword}'")
+            search_url = f"https://www.linkedin.com/search/results/content/?keywords={keyword.replace(' ', '%20')}&sortBy=date_posted"
+            await page.goto(search_url, wait_until="networkidle")
+            await asyncio.sleep(8)
 
-            print(f"\nSleeping 30 minutes...")
-            await asyncio.sleep(NOTIFIER_INTERVAL)
+            for _ in range(3):
+                await page.evaluate("window.scrollBy(0, 600)")
+                await asyncio.sleep(2)
 
-asyncio.run(main())
+            cards = await page.query_selector_all('.occludable-update')
+            print(f"  Found {len(cards)} posts\n")
+
+            for card in cards:
+                if actions_done >= MAX_ACTIONS_PER_RUN:
+                    break
+
+                try:
+                    # Get post text
+                    text_el  = await card.query_selector('span.break-words')
+                    post_text = await text_el.inner_text() if text_el else ""
+                    if not post_text:
+                        continue
+
+                    # Get profile URL
+                    links       = await card.query_selector_all('a')
+                    profile_url = ""
+                    is_company  = False
+                    for link in links:
+                        href = await link.get_attribute('href') or ''
+                        if '/in/' in href:
+                            profile_url = href.split('?')[0]
+                            break
+                        if '/company/' in href:
+                            profile_url = href.split('?')[0]
+                            is_company  = True
+                            break
+
+                    if not profile_url:
+                        continue
+
+                    # Duplicate check
+                    if is_already_contacted(profile_url):
+                        print(f"  Already contacted — skip")
+                        continue
+
+                    # Qualify with GPT
+                    if not is_relevant(post_text):
+                        print(f"  Not relevant — skip")
+                        continue
+
+                    client_type = get_client_type(post_text)
+                    print(f"  Client type: {client_type}")
+
+                    # Get author name
+                    author_el   = await card.query_selector('.update-components-actor__title span:not(.visually-hidden)')
+                    author_name = await author_el.inner_text() if author_el else "Unknown"
+                    author_name = author_name.strip().split('\n')[0]
+
+                    # Case study check
+                    case_studies = ""
+                    if detect_proof_request(post_text):
+                        case_studies = get_case_studies(keyword)
+
+                    # ACTION — Personal = Comment, Company = DM
+                    if is_company:
+                        dm_text = generate_dm(post_text, client_type, case_studies)
+                        print(f"  Company: {author_name} → DM")
+                        success = await dm_company(page, profile_url, dm_text)
+                        message = dm_text
+                    else:
+                        comment_text = generate_comment(post_text, client_type)
+                        print(f"  Personal: {author_name} → Comment")
+                        success = await comment_on_post(page, card, comment_text)
+                        message = comment_text
+
+                    if success:
+                        actions_done += 1
+
+                        # Save to Supabase
+                        supabase_insert("leads_queue", {
+                            "platform":                "linkedin",
+                            "potential_client_name":   author_name,
+                            "potential_client_profile": profile_url,
+                            "post_content":            post_text[:500],
+                            "assigned_to":             "linkedin_watcher",
+                            "status":                  "contacted"
+                        })
+                        supabase_insert("conversations", {
+                            "platform":    "linkedin",
+                            "message":     message,
+                            "sender":      "agent",
+                            "message_type": "dm" if is_company else "comment",
+                            "status":      "active"
+                        })
+                        supabase_insert("agent_logs", {
+                            "agent_name": "linkedin_watcher",
+                            "action":     f"{'DM' if is_company else 'Comment'} sent to {author_name}",
+                            "details":    profile_url,
+                            "status":     "success"
+                        })
+
+                        print(f"  Saved to Supabase!")
+                        await asyncio.sleep(random.uniform(20, 40))
+
+                except Exception as e:
+                    print(f"  Post error: {e}")
+                    continue
+
+            await asyncio.sleep(random.uniform(5, 10))
+
+        print(f"\n{'='*50}")
+        print(f"Done! Actions taken: {actions_done}")
+        print(f"{'='*50}")
+        await browser.close()
+
+# ============================================================
+# RUN
+# ============================================================
+asyncio.run(run_watcher())
