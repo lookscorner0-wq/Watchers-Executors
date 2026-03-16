@@ -94,23 +94,26 @@ OUTPUT FORMAT FOR DMs:
 def generate_keywords():
     result = call_openai([
         {"role": "system", "content": (
-            "You generate LinkedIn search keywords to find potential clients "
-            "for an AI Automation Agency offering: Lead Generation, Social Media "
-            "Marketing, AI Chatbots, Custom Workflows (N8N, Make, Zapier). "
-            "Generate exactly 3 short search keywords. "
-            "Each keyword must be 3-4 words MAXIMUM. "
-            "Keywords should find people LOOKING TO HIRE these services. "
-            "Reply ONLY as comma separated list. No explanation. No numbering. "
-            "Example: need chatbot built, hire automation expert, want AI agent"
+            "Generate 3 LinkedIn search keywords for finding business owners "
+            "who need to BUY services. "
+            "RULES: "
+            "1. Each keyword max 3 words "
+            "2. Must contain words like: need, want, looking, struggling, help "
+            "3. Target BUYERS not developers or job seekers "
+            "4. Keywords must return RECENT posts on LinkedIn "
+            "5. Use simple common phrases people actually type "
+            "BAD examples: hire AI chatbot developer, looking for lead generation specialist "
+            "GOOD examples: need automation help, want chatbot, struggling with leads "
+            "Reply ONLY comma separated 3 keywords. Nothing else."
         )},
-        {"role": "user", "content": "Generate 3 fresh LinkedIn search keywords now."}
-    ], max_tokens=40, temperature=0.8)
+        {"role": "user", "content": "Generate 3 keywords now."}
+    ], max_tokens=25, temperature=0.9)
 
-    keywords = [k.strip() for k in result.split(",") if k.strip()]
+    keywords = [k.strip().lower() for k in result.split(",") if k.strip()]
     if len(keywords) < 3:
-        keywords = ["need lead generation", "need chatbot", "looking for automation"]
+        keywords = ["need automation", "want chatbot", "struggling with leads"]
     print(f"Keywords this run: {keywords}")
-    return keywords[:3]
+    return keywords[:4]
 
 # ============================================================
 # 24 HOUR FILTER
