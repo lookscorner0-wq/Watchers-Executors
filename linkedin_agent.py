@@ -1,28 +1,29 @@
 # ============================================================
 # linkedin_watcher.py
 # NoErrors AI Automation Agency — LinkedIn Watcher Agent
+# First outreach ONLY — comments + DMs
+# Replier handles everything after
 # ============================================================
 
 import os
 import asyncio
 import random
-import time
 import requests
 from playwright.async_api import async_playwright
 
 # ============================================================
 # CREDENTIALS
 # ============================================================
-LI_AT           = os.environ.get("LI_AT", "")
-LI_JSESSIONID   = os.environ.get("LI_JSESSIONID", "")
-OPENAI_KEY      = os.environ.get("OPENAI_KEY", "")
-SUPABASE_URL    = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY", "")
+LI_AT         = os.environ.get("LI_AT", "")
+LI_JSESSIONID = os.environ.get("LI_JSESSIONID", "")
+OPENAI_KEY    = os.environ.get("OPENAI_KEY", "")
+SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
 
 MAX_ACTIONS_PER_RUN = 10
 
 # ============================================================
-# SEARCH KEYWORDS
+# KEYWORDS
 # ============================================================
 KEYWORDS = [
     "need lead generation",
@@ -38,7 +39,7 @@ KEYWORDS = [
 ]
 
 # ============================================================
-# USER AGENTS ROTATION (Windows, Mac, Linux)
+# USER AGENTS ROTATION
 # ============================================================
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -49,7 +50,7 @@ USER_AGENTS = [
 ]
 
 # ============================================================
-# SYSTEM PROMPT — Bilal Dev Brain
+# SYSTEM PROMPT
 # ============================================================
 SYSTEM_PROMPT = """
 You are Bilal Dev, sales manager for NoErrors — an AI Automation Agency.
@@ -74,70 +75,40 @@ HOW TO CLASSIFY CLIENT:
 HARD RULES — NEVER BREAK THESE:
 1. NEVER share price in first or second message
 2. NEVER sound salesy — always sound helpful and specific
-3. NEVER use markdown, bold, bullets, or formatting in messages — plain text only
-4. NEVER reveal you are an AI — if asked, say: I am part of the NoErrors sales team, for detailed technical questions I can connect you with our lead consultant directly
-5. NEVER mention services the client did not ask for in first message
-6. NEVER promise a delivery timeline before scoping the project
-7. NEVER reveal team size — say: we are a focused specialist team, quality over quantity
-8. NEVER give price to Opportunity client — always push for discovery call
-9. NEVER send more than 180 characters in first outreach message
+3. NEVER use markdown, bold, bullets, or formatting — plain text only
+4. NEVER reveal you are an AI
+5. NEVER mention services client did not ask for in first message
+6. NEVER promise delivery timeline before scoping
+7. NEVER reveal team size
+8. NEVER give price to Opportunity client
+9. NEVER send more than 180 characters in first outreach
 10. NEVER use emojis with Opportunity clients
 11. NEVER agree to free trial — offer free audit instead
 12. NEVER compete on price — compete on value and ROI
 
-WHAT WORKS — ALWAYS DO THESE:
-1. Mirror exact technical language from their post or job description
+WHAT WORKS:
+1. Mirror exact technical language from their post
 2. Frame hook around what client is LOSING not what we offer
-3. Include a specific result number in hook when possible (e.g. saved 15 hours per week)
-4. For Main Client — use curiosity question hook with casual tone
-5. For GoodClient — lead with free audit offer, it removes all hesitation
-6. For Opportunity — open with enterprise client reference and specific result achieved
-7. Follow up within 24 hours of connection accept
-8. After ghost for 24 hours — send one short casual message: Hey, just checking if you had a chance to review — worth a 5 min chat?
-9. After mid-conversation ghost — wait 48 hours then send one final non-pushy message
-10. When client asks why us — answer with specific result: we automated X for similar business and saved Y hours per week
-11. When client changes scope — say: let us lock the core requirement first before expanding scope
-12. When client says they will handle internally — say: most clients said that before realizing the time and cost of doing it alone
-13. When client mentions negative review — address calmly with case study evidence, never panic
-14. When client asks complex technical question — say: great question, let me confirm exact specs with our technical lead and get back to you
-15. When client asks for references — redirect to case study outcomes, never say no references
-16. When client asks team size or company age — say: we are a focused specialist team, our results matter more than headcount
-17. When client demands free trial — counter with: we do not offer free trials but we can do a free audit of your current setup
-18. For slow responding client — maximum one follow up every 3 days, never be aggressive
-19. For low budget client — offer smaller starter package, never reduce core price, anchor value first
-20. For multi-service request — focus on single biggest pain point first, other services come after trust builds
-
-SIGNAL DETECTION:
-- Green: client says yes, interested, lets talk, sounds good, how much, tell me more, great, sure
-- Red: client says no thanks, not interested, already hired, not looking
-- Yellow: client asks about legal, NDA, references
-
-CASE STUDY TRIGGER:
-If client asks for proof, results, portfolio, past work, examples, references, or says have you done this before — you must say:
-"Absolutely — let me share what we delivered for a similar client. [INSERT CASE STUDY HERE]"
-Then use the most relevant case study based on their service need.
-
-CONVERSATION GOAL:
-- First message: spark curiosity, never pitch
-- Second message: understand their exact need
-- Third message: position our solution with a result number
-- Fourth message: push for WhatsApp call or discovery call
-- If client agrees to WhatsApp: collect their number, notify manager agent
+3. Include specific result number when possible
+4. For Main Client — curiosity question hook, casual tone
+5. For GoodClient — lead with free audit offer
+6. For Opportunity — open with enterprise reference and specific result
+7. Never start with Hi I am Bilal — start with their pain point
 
 OUTPUT FORMAT FOR COMMENTS:
 - Plain text only
-- Maximum 180 characters for first outreach
-- No hashtags in comments
-- End with a soft question to open conversation
+- Maximum 180 characters
+- No hashtags
+- End with soft question
 
 OUTPUT FORMAT FOR DMs:
 - Plain text only
-- First DM maximum 2 sentences
-- Never start with "Hi I am Bilal" — start with their pain point
+- Maximum 2 sentences
+- Start with their pain point
 """
 
 # ============================================================
-# SUPABASE HELPERS
+# SUPABASE
 # ============================================================
 def supabase_insert(table, data):
     try:
@@ -154,7 +125,7 @@ def supabase_insert(table, data):
         )
         return res.status_code in [200, 201]
     except Exception as e:
-        print(f"Supabase insert error: {e}")
+        print(f"Supabase error: {e}")
         return False
 
 def is_already_contacted(profile_url):
@@ -172,29 +143,8 @@ def is_already_contacted(profile_url):
     except:
         return False
 
-def get_case_studies(service_type):
-    try:
-        res = requests.get(
-            f"{SUPABASE_URL}/rest/v1/case_studies",
-            headers={
-                "apikey":        SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-            },
-            params={"service_type": f"ilike.%{service_type}%", "select": "*", "limit": "3"},
-            timeout=10
-        )
-        cases = res.json()
-        if not cases:
-            return ""
-        result = ""
-        for c in cases:
-            result += f"Client: {c.get('client_name')} | Service: {c.get('service')} | Problem: {c.get('problem')} | Result: {c.get('results')} | Review: {c.get('review')}\n"
-        return result
-    except:
-        return ""
-
 # ============================================================
-# GPT-4o-mini HELPERS
+# OPENAI
 # ============================================================
 def call_openai(messages, max_tokens=150, temperature=0.5):
     try:
@@ -229,24 +179,8 @@ def is_relevant(post_text):
     ], max_tokens=10, temperature=0.1)
     return "relevant: yes" in result.lower()
 
-def detect_proof_request(text):
-    triggers = ["proof", "results", "case study", "portfolio", "past work",
-                "examples", "references", "have you done", "show me your work",
-                "previous clients", "experience"]
-    return any(t in text.lower() for t in triggers)
-
-def detect_signal(text):
-    text = text.lower()
-    if any(x in text for x in ["yes", "interested", "lets talk", "sounds good", "how much", "tell me more", "great", "sure", "okay"]):
-        return "Green"
-    if any(x in text for x in ["no thanks", "not interested", "already hired", "not looking"]):
-        return "Red"
-    if any(x in text for x in ["contract", "legal", "nda", "proof", "portfolio", "references", "past work"]):
-        return "Yellow"
-    return None
-
 def generate_comment(post_text, client_type):
-    temp = 0.7 if client_type == "Main Client" else 0.4
+    temp    = 0.7 if client_type == "Main Client" else 0.4
     comment = call_openai([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
@@ -259,11 +193,10 @@ def generate_comment(post_text, client_type):
     comment = comment.replace("**","").replace("*","").replace("#","").replace("\n"," ")
     return comment[:180] if len(comment) > 180 else comment
 
-def generate_dm(post_text, client_type, case_studies=""):
-    extra = f"\n\nRelevant case studies:\n{case_studies}" if case_studies else ""
-    temp  = 0.3 if client_type == "Opportunity" else 0.5
-    dm = call_openai([
-        {"role": "system", "content": SYSTEM_PROMPT + extra},
+def generate_dm(post_text, client_type):
+    temp = 0.3 if client_type == "Opportunity" else 0.5
+    dm   = call_openai([
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
             f"Write a LinkedIn DM for this post. Client type: {client_type}.\n"
             f"Post: {post_text[:300]}\n\n"
@@ -274,7 +207,7 @@ def generate_dm(post_text, client_type, case_studies=""):
     return dm.replace("**","").replace("*","").replace("#","").replace("\n"," ")
 
 # ============================================================
-# BROWSER SETUP
+# BROWSER HELPERS
 # ============================================================
 def get_cookies():
     return [
@@ -302,14 +235,14 @@ async def comment_on_post(page, card, comment_text):
             'button[aria-label*="comment"], button:has-text("Comment")'
         )
         if not comment_btn:
-            return False
+            return False, ""
 
         await comment_btn.click()
         await asyncio.sleep(random.uniform(2, 3))
 
         comment_box = await page.query_selector('div.ql-editor, div[contenteditable="true"]')
         if not comment_box:
-            return False
+            return False, ""
 
         await comment_box.click()
         await asyncio.sleep(1)
@@ -323,12 +256,15 @@ async def comment_on_post(page, card, comment_text):
             await submit_btn.click()
 
         await asyncio.sleep(3)
+
+        # Get post URL after comment
+        post_url = page.url.split('?')[0]
         print(f"  Comment posted!")
-        return True
+        return True, post_url
 
     except Exception as e:
         print(f"  Comment error: {e}")
-        return False
+        return False, ""
 
 # ============================================================
 # DM ON COMPANY PAGE
@@ -338,13 +274,17 @@ async def dm_company(page, profile_url, dm_text):
         await page.goto(profile_url, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(4, 6))
 
-        msg_btn = await page.query_selector('button:has-text("Message"), a:has-text("Message")')
+        msg_btn = await page.query_selector(
+            'button:has-text("Message"), a:has-text("Message")'
+        )
         if not msg_btn:
             dots = await page.query_selector('button[aria-label*="More"]')
             if dots:
                 await dots.click()
                 await asyncio.sleep(2)
-                msg_btn = await page.query_selector('li:has-text("Message"), div:has-text("Send message")')
+                msg_btn = await page.query_selector(
+                    'li:has-text("Message"), div:has-text("Send message")'
+                )
 
         if not msg_btn:
             return False
@@ -352,15 +292,19 @@ async def dm_company(page, profile_url, dm_text):
         await msg_btn.click()
         await asyncio.sleep(random.uniform(3, 4))
 
-        # Handle topic dropdown if present
-        topic_dropdown = await page.query_selector('select, div[aria-label*="topic"]')
-        if topic_dropdown:
-            await topic_dropdown.click()
-            await asyncio.sleep(1)
-            first_option = await page.query_selector('option:not([value=""]), li[role="option"]')
-            if first_option:
-                await first_option.click()
-            await asyncio.sleep(1)
+        # Topic dropdown — Service Request → Request a Demo → General Inquiry
+        topic_options = ["Service Request", "Request a Demo", "General Inquiry"]
+        for topic in topic_options:
+            try:
+                option = await page.query_selector(
+                    f'option:has-text("{topic}"), li:has-text("{topic}")'
+                )
+                if option:
+                    await option.click()
+                    await asyncio.sleep(1)
+                    break
+            except:
+                continue
 
         msg_box = await page.query_selector('textarea, div[contenteditable="true"]')
         if not msg_box:
@@ -371,7 +315,9 @@ async def dm_company(page, profile_url, dm_text):
         await human_type(msg_box, dm_text)
         await asyncio.sleep(random.uniform(2, 3))
 
-        send_btn = await page.query_selector('button:has-text("Send message"), button:has-text("Send")')
+        send_btn = await page.query_selector(
+            'button:has-text("Send message"), button:has-text("Send")'
+        )
         if send_btn:
             await send_btn.click()
             await asyncio.sleep(2)
@@ -437,12 +383,12 @@ async def run_watcher():
 
                 try:
                     # Get post text
-                    text_el  = await card.query_selector('span.break-words')
+                    text_el   = await card.query_selector('span.break-words')
                     post_text = await text_el.inner_text() if text_el else ""
                     if not post_text:
                         continue
 
-                    # Get profile URL
+                    # Get profile URL + check company
                     links       = await card.query_selector_all('a')
                     profile_url = ""
                     is_company  = False
@@ -464,55 +410,67 @@ async def run_watcher():
                         print(f"  Already contacted — skip")
                         continue
 
-                    # Qualify with GPT
+                    # GPT qualify check
                     if not is_relevant(post_text):
                         print(f"  Not relevant — skip")
                         continue
 
                     client_type = get_client_type(post_text)
-                    print(f"  Client type: {client_type}")
 
                     # Get author name
-                    author_el   = await card.query_selector('.update-components-actor__title span:not(.visually-hidden)')
+                    author_el   = await card.query_selector(
+                        '.update-components-actor__title span:not(.visually-hidden)'
+                    )
                     author_name = await author_el.inner_text() if author_el else "Unknown"
                     author_name = author_name.strip().split('\n')[0]
 
-                    # Case study check
-                    case_studies = ""
-                    if detect_proof_request(post_text):
-                        case_studies = get_case_studies(keyword)
+                    print(f"  Author: {author_name} | Type: {client_type} | Company: {is_company}")
 
-                    # ACTION — Personal = Comment, Company = DM
+                    # ACTION
+                    post_url = ""
+                    success  = False
+
                     if is_company:
-                        dm_text = generate_dm(post_text, client_type, case_studies)
-                        print(f"  Company: {author_name} → DM")
-                        success = await dm_company(page, profile_url, dm_text)
-                        message = dm_text
+                        dm_text = generate_dm(post_text, client_type)
+                        print(f"  → Sending DM...")
+                        success  = await dm_company(page, profile_url, dm_text)
+                        message  = dm_text
+                        msg_type = "dm"
+                        post_url = profile_url
                     else:
-                        comment_text = generate_comment(post_text, client_type)
-                        print(f"  Personal: {author_name} → Comment")
-                        success = await comment_on_post(page, card, comment_text)
-                        message = comment_text
+                        comment_text        = generate_comment(post_text, client_type)
+                        print(f"  → Commenting...")
+                        success, post_url   = await comment_on_post(page, card, comment_text)
+                        message             = comment_text
+                        msg_type            = "comment"
 
                     if success:
                         actions_done += 1
 
-                        # Save to Supabase
+                        # Save lead
                         supabase_insert("leads_queue", {
-                            "platform":                "linkedin",
-                            "potential_client_name":   author_name,
+                            "platform":                 "linkedin",
+                            "potential_client_name":    author_name,
                             "potential_client_profile": profile_url,
-                            "post_content":            post_text[:500],
-                            "assigned_to":             "linkedin_watcher",
-                            "status":                  "contacted"
+                            "post_content":             post_text[:500],
+                            "post_url":                 post_url,
+                            "assigned_to":              "linkedin_watcher",
+                            "status":                   "contacted"
                         })
+
+                        # Save conversation
                         supabase_insert("conversations", {
                             "platform":    "linkedin",
+                            "profile_url": profile_url,
+                            "post_url":    post_url,
+                            "client_type": client_type,
                             "message":     message,
                             "sender":      "agent",
-                            "message_type": "dm" if is_company else "comment",
-                            "status":      "active"
+                            "message_type": msg_type,
+                            "status":      "approval_sent"
                         })
+
+                        # Save log
                         supabase_insert("agent_logs", {
                             "agent_name": "linkedin_watcher",
                             "action":     f"{'DM' if is_company else 'Comment'} sent to {author_name}",
@@ -520,7 +478,7 @@ async def run_watcher():
                             "status":     "success"
                         })
 
-                        print(f"  Saved to Supabase!")
+                        print(f"  Saved! Status: approval_sent\n")
                         await asyncio.sleep(random.uniform(20, 40))
 
                 except Exception as e:
@@ -530,7 +488,7 @@ async def run_watcher():
             await asyncio.sleep(random.uniform(5, 10))
 
         print(f"\n{'='*50}")
-        print(f"Done! Actions taken: {actions_done}")
+        print(f"Done! Actions: {actions_done}")
         print(f"{'='*50}")
         await browser.close()
 
