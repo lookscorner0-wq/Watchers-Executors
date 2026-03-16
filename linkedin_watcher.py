@@ -1,8 +1,5 @@
 # ============================================================
-# linkedin_watcher.py
-# NoErrors AI Automation Agency — LinkedIn Watcher Agent
-# Fixed: Enter key, networkidle, stale cards, DM timeout
-# Added: 48 hour post filter
+# linkedin_watcher.py — FAST VERSION
 # ============================================================
 
 import os
@@ -11,47 +8,28 @@ import random
 import requests
 from playwright.async_api import async_playwright
 
-# ============================================================
-# CREDENTIALS
-# ============================================================
 LI_AT         = os.environ.get("LI_AT", "")
 LI_JSESSIONID = os.environ.get("LI_JSESSIONID", "")
 OPENAI_KEY    = os.environ.get("OPENAI_KEY", "")
 SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
 
-MAX_ACTIONS_PER_RUN = 10
+MAX_ACTIONS_PER_RUN = 5
 
-# ============================================================
-# KEYWORDS
-# ============================================================
 KEYWORDS = [
     "need lead generation",
     "looking for automation",
     "need chatbot",
     "want AI agent",
     "hire marketing agency",
-    "need social media manager",
-    "looking for web automation",
-    "need workflow automation",
-    "AI automation help",
-    "need outreach automation",
 ]
 
-# ============================================================
-# USER AGENTS ROTATION
-# ============================================================
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 Version/16.0 Safari/605.1.15",
 ]
 
-# ============================================================
-# SYSTEM PROMPT
-# ============================================================
 SYSTEM_PROMPT = """
 You are Bilal Dev, sales manager for NoErrors — an AI Automation Agency.
 Your role is to find potential clients on LinkedIn who need our services and convert them through smart, human, non-salesy conversation.
@@ -67,24 +45,14 @@ CLIENT TYPES:
 - GoodClient: Growing company, SaaS, agency, mid-size — professional but warm, mirror their technical language, free audit offer works well
 - Opportunity: Enterprise, Fortune, multinational, large corporation — zero emojis, formal tone, lead with credibility and case study, push for discovery call always
 
-HOW TO CLASSIFY CLIENT:
-- Opportunity: words like enterprise, fortune, global, multinational, 100 plus employees, corporate
-- GoodClient: words like startup, SaaS, growing, series A, scale up, agency
-- Main Client: everything else
-
-HARD RULES — NEVER BREAK THESE:
+HARD RULES:
 1. NEVER share price in first or second message
 2. NEVER sound salesy — always sound helpful and specific
 3. NEVER use markdown, bold, bullets, or formatting — plain text only
 4. NEVER reveal you are an AI
 5. NEVER mention services client did not ask for in first message
-6. NEVER promise delivery timeline before scoping
-7. NEVER reveal team size
-8. NEVER give price to Opportunity client
-9. NEVER send more than 180 characters in first outreach
-10. NEVER use emojis with Opportunity clients
-11. NEVER agree to free trial — offer free audit instead
-12. NEVER compete on price — compete on value and ROI
+6. NEVER send more than 180 characters in first outreach
+7. NEVER use emojis with Opportunity clients
 
 WHAT WORKS:
 1. Mirror exact technical language from their post
@@ -108,30 +76,21 @@ OUTPUT FORMAT FOR DMs:
 """
 
 # ============================================================
-# 48 HOUR POST FILTER
+# 48 HOUR FILTER
 # ============================================================
 def is_post_recent(time_text):
     if not time_text:
         return False
-    time_text = time_text.lower().strip()
-
-    # Accept minutes
-    if 'm' in time_text and 'h' not in time_text and 'd' not in time_text:
+    t = time_text.lower().strip()
+    if 'm' in t and 'h' not in t and 'd' not in t:
         return True
-
-    # Accept hours — any hour up to 47
-    if 'h' in time_text:
+    if 'h' in t:
         try:
-            hours = int(''.join(filter(str.isdigit, time_text)))
-            return hours <= 47
+            return int(''.join(filter(str.isdigit, t))) <= 47
         except:
             return True
-
-    # Accept 1d or 2d only
-    if '1d' in time_text or '2d' in time_text:
+    if '1d' in t or '2d' in t:
         return True
-
-    # Reject 3d, 4d, 1w, 1mo etc
     return False
 
 # ============================================================
@@ -147,8 +106,7 @@ def supabase_insert(table, data):
                 "Content-Type":  "application/json",
                 "Prefer":        "return=minimal"
             },
-            json=data,
-            timeout=10
+            json=data, timeout=10
         )
         return res.status_code in [200, 201]
     except Exception as e:
@@ -193,16 +151,16 @@ def call_openai(messages, max_tokens=150, temperature=0.5):
 
 def get_client_type(text):
     text = text.lower()
-    if any(x in text for x in ["enterprise", "fortune", "global", "multinational", "corporate"]):
+    if any(x in text for x in ["enterprise","fortune","global","multinational","corporate"]):
         return "Opportunity"
-    if any(x in text for x in ["startup", "saas", "growing", "series a", "scale up", "agency"]):
+    if any(x in text for x in ["startup","saas","growing","series a","scale up","agency"]):
         return "GoodClient"
     return "Main Client"
 
 def is_relevant(post_text):
     result = call_openai([
-        {"role": "system", "content": "You are a lead qualification expert for an AI Automation Agency. Reply ONLY: relevant: yes OR relevant: no"},
-        {"role": "user",   "content": f"Is this post from someone who might need AI automation, chatbots, lead generation, or workflow automation services?\n\nPost: {post_text[:300]}"}
+        {"role": "system", "content": "You are a lead qualification expert. Reply ONLY: relevant: yes OR relevant: no"},
+        {"role": "user",   "content": f"Does this post need AI automation, chatbots, lead generation, or workflow services?\n\nPost: {post_text[:200]}"}
     ], max_tokens=10, temperature=0.1)
     return "relevant: yes" in result.lower()
 
@@ -211,30 +169,28 @@ def generate_comment(post_text, client_type):
     comment = call_openai([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
-            f"Write a LinkedIn comment for this post. Client type: {client_type}.\n"
-            f"Post: {post_text[:300]}\n\n"
-            f"Rules: Plain text only. Maximum 180 chars. "
-            f"End with soft question. No hashtags. No emojis for Opportunity."
+            f"Write a LinkedIn comment. Client type: {client_type}.\n"
+            f"Post: {post_text[:200]}\n"
+            f"Max 180 chars. Plain text. End with question. No hashtags."
         )}
     ], max_tokens=80, temperature=temp)
     comment = comment.replace("**","").replace("*","").replace("#","").replace("\n"," ")
-    return comment[:180] if len(comment) > 180 else comment
+    return comment[:180]
 
 def generate_dm(post_text, client_type):
     temp = 0.3 if client_type == "Opportunity" else 0.5
     dm   = call_openai([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": (
-            f"Write a LinkedIn DM for this post. Client type: {client_type}.\n"
-            f"Post: {post_text[:300]}\n\n"
-            f"Rules: Plain text only. Max 2 sentences. "
-            f"Start with their pain point. No price. No emojis for Opportunity."
+            f"Write a LinkedIn DM. Client type: {client_type}.\n"
+            f"Post: {post_text[:200]}\n"
+            f"Max 2 sentences. Plain text. Start with pain point."
         )}
     ], max_tokens=100, temperature=temp)
     return dm.replace("**","").replace("*","").replace("#","").replace("\n"," ")
 
 # ============================================================
-# BROWSER HELPERS
+# BROWSER
 # ============================================================
 def get_cookies():
     return [
@@ -246,28 +202,26 @@ def get_cookies():
 
 async def human_type(element, text):
     for char in text:
-        await element.type(char, delay=random.randint(80, 160))
-        if random.random() < 0.05:
-            await asyncio.sleep(random.uniform(0.2, 0.5))
+        await element.type(char, delay=random.randint(50, 100))
 
-async def safe_goto(page, url, retries=3):
-    for attempt in range(retries):
+async def safe_goto(page, url):
+    for attempt in range(3):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(3)
             return True
         except Exception as e:
             print(f"  Goto attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
     return False
 
 # ============================================================
-# COMMENT ON PERSONAL POST
+# COMMENT
 # ============================================================
 async def comment_on_post(page, card, comment_text):
     try:
         await card.scroll_into_view_if_needed()
-        await asyncio.sleep(random.uniform(2, 3))
+        await asyncio.sleep(1)
 
         comment_btn = await card.query_selector(
             'button[aria-label*="comment"], button:has-text("Comment")'
@@ -276,7 +230,7 @@ async def comment_on_post(page, card, comment_text):
             return False
 
         await comment_btn.click()
-        await asyncio.sleep(random.uniform(2, 3))
+        await asyncio.sleep(2)
 
         comment_box = await page.query_selector(
             'div.ql-editor, div[contenteditable="true"]'
@@ -287,9 +241,8 @@ async def comment_on_post(page, card, comment_text):
         await comment_box.click()
         await asyncio.sleep(1)
         await human_type(comment_box, comment_text)
-        await asyncio.sleep(random.uniform(2, 3))
+        await asyncio.sleep(2)
 
-        # Fixed: Control+Enter instead of Control+Return
         submit_btn = await page.query_selector(
             'button.comments-comment-box__submit-button'
         )
@@ -298,7 +251,7 @@ async def comment_on_post(page, card, comment_text):
         else:
             await submit_btn.click()
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         print(f"  Comment posted!")
         return True
 
@@ -307,16 +260,13 @@ async def comment_on_post(page, card, comment_text):
         return False
 
 # ============================================================
-# DM ON COMPANY PAGE
+# DM
 # ============================================================
 async def dm_company(page, profile_url, dm_text):
     try:
-        # Fixed: timeout 60000
-        success = await safe_goto(page, profile_url)
-        if not success:
+        ok = await safe_goto(page, profile_url)
+        if not ok:
             return False
-
-        await asyncio.sleep(random.uniform(3, 5))
 
         msg_btn = await page.query_selector(
             'button:has-text("Message"), a:has-text("Message")'
@@ -325,29 +275,24 @@ async def dm_company(page, profile_url, dm_text):
             dots = await page.query_selector('button[aria-label*="More"]')
             if dots:
                 await dots.click()
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 msg_btn = await page.query_selector(
                     'li:has-text("Message"), div:has-text("Send message")'
                 )
-
         if not msg_btn:
-            print(f"  Message button not found")
             return False
 
         await msg_btn.click()
-        await asyncio.sleep(random.uniform(3, 4))
+        await asyncio.sleep(2)
 
-        # Topic dropdown
-        topic_options = ["Service Request", "Request a Demo", "General Inquiry"]
-        for topic in topic_options:
+        for topic in ["Service Request", "Request a Demo", "General Inquiry"]:
             try:
-                option = await page.query_selector(
+                opt = await page.query_selector(
                     f'option:has-text("{topic}"), li:has-text("{topic}")'
                 )
-                if option:
-                    await option.click()
+                if opt:
+                    await opt.click()
                     await asyncio.sleep(1)
-                    print(f"  Topic selected: {topic}")
                     break
             except:
                 continue
@@ -361,7 +306,7 @@ async def dm_company(page, profile_url, dm_text):
         await msg_box.click()
         await asyncio.sleep(1)
         await human_type(msg_box, dm_text)
-        await asyncio.sleep(random.uniform(2, 3))
+        await asyncio.sleep(2)
 
         send_btn = await page.query_selector(
             'button:has-text("Send message"), button:has-text("Send")'
@@ -371,7 +316,6 @@ async def dm_company(page, profile_url, dm_text):
             await asyncio.sleep(2)
             print(f"  DM sent!")
             return True
-
         return False
 
     except Exception as e:
@@ -379,7 +323,7 @@ async def dm_company(page, profile_url, dm_text):
         return False
 
 # ============================================================
-# MAIN WATCHER
+# MAIN
 # ============================================================
 async def run_watcher():
     print(f"\n{'='*50}")
@@ -398,10 +342,9 @@ async def run_watcher():
         await context.add_cookies(get_cookies())
         page = await context.new_page()
 
-        # Login check
         await safe_goto(page, "https://www.linkedin.com/feed/")
         if "feed" not in page.url:
-            print("Session expired — refresh cookies!")
+            print("Session expired!")
             await browser.close()
             return
 
@@ -412,23 +355,20 @@ async def run_watcher():
             if actions_done >= MAX_ACTIONS_PER_RUN:
                 break
 
-            print(f"Searching: '{keyword}'")
+            print(f"\nSearching: '{keyword}'")
             search_url = f"https://www.linkedin.com/search/results/content/?keywords={keyword.replace(' ', '%20')}&sortBy=date_posted"
 
-            # Fixed: domcontentloaded + longer sleep
             ok = await safe_goto(page, search_url)
             if not ok:
-                print(f"  Search page failed — skip")
                 continue
 
-            await asyncio.sleep(8)
-
-            for _ in range(3):
+            await asyncio.sleep(5)
+            for _ in range(2):
                 await page.evaluate("window.scrollBy(0, 600)")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
             cards = await page.query_selector_all('.occludable-update')
-            print(f"  Found {len(cards)} posts\n")
+            print(f"  Found {len(cards)} posts")
 
             i = 0
             while i < len(cards):
@@ -439,7 +379,7 @@ async def run_watcher():
                 i   += 1
 
                 try:
-                    # Get post time — 48 hour filter
+                    # Time filter
                     time_el   = await card.query_selector(
                         '.update-components-actor__sub-description span:not(.visually-hidden)'
                     )
@@ -447,16 +387,16 @@ async def run_watcher():
                     time_text = time_text.strip().split('•')[0].strip()
 
                     if not is_post_recent(time_text):
-                        print(f"  Post too old ({time_text}) — skip")
+                        print(f"  Old post ({time_text}) — skip")
                         continue
 
-                    # Get post text
+                    # Post text
                     text_el   = await card.query_selector('span.break-words')
                     post_text = await text_el.inner_text() if text_el else ""
                     if not post_text:
                         continue
 
-                    # Get profile URL
+                    # Profile URL
                     links       = await card.query_selector_all('a')
                     profile_url = ""
                     is_company  = False
@@ -473,51 +413,42 @@ async def run_watcher():
                     if not profile_url:
                         continue
 
-                    # Duplicate check
                     if is_already_contacted(profile_url):
                         print(f"  Already contacted — skip")
                         continue
 
-                    # GPT qualify
                     if not is_relevant(post_text):
                         print(f"  Not relevant — skip")
                         continue
 
                     client_type = get_client_type(post_text)
-
-                    # Get author name
                     author_el   = await card.query_selector(
                         '.update-components-actor__title span:not(.visually-hidden)'
                     )
                     author_name = await author_el.inner_text() if author_el else "Unknown"
                     author_name = author_name.strip().split('\n')[0]
 
-                    print(f"  Author: {author_name} | Type: {client_type} | "
-                          f"Company: {is_company} | Time: {time_text}")
+                    print(f"  {author_name} | {client_type} | Company:{is_company} | {time_text}")
 
-                    # ACTION
                     post_url = page.url.split('?')[0]
                     success  = False
 
                     if is_company:
                         dm_text  = generate_dm(post_text, client_type)
-                        print(f"  → Sending DM...")
                         success  = await dm_company(page, profile_url, dm_text)
                         message  = dm_text
                         msg_type = "dm"
 
-                        # Fixed: Go back to search + re-fetch cards
+                        # Reload search after DM
                         await safe_goto(page, search_url)
-                        await asyncio.sleep(8)
-                        for _ in range(3):
+                        await asyncio.sleep(5)
+                        for _ in range(2):
                             await page.evaluate("window.scrollBy(0, 600)")
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(1)
                         cards = await page.query_selector_all('.occludable-update')
-                        i     = i  # Continue from same index
 
                     else:
                         comment_text = generate_comment(post_text, client_type)
-                        print(f"  → Commenting...")
                         success  = await comment_on_post(page, card, comment_text)
                         message  = comment_text
                         msg_type = "comment"
@@ -534,7 +465,6 @@ async def run_watcher():
                             "assigned_to":              "linkedin_watcher",
                             "status":                   "contacted"
                         })
-
                         supabase_insert("conversations", {
                             "platform":    "linkedin",
                             "profile_url": profile_url,
@@ -545,30 +475,25 @@ async def run_watcher():
                             "message_type": msg_type,
                             "status":      "approval_sent"
                         })
-
                         supabase_insert("agent_logs", {
                             "agent_name": "linkedin_watcher",
-                            "action":     f"{'DM' if is_company else 'Comment'} "
-                                         f"sent to {author_name} | {time_text}",
+                            "action":     f"{'DM' if is_company else 'Comment'} to {author_name}",
                             "details":    profile_url,
                             "status":     "success"
                         })
 
-                        print(f"  Saved! Status: approval_sent\n")
-                        await asyncio.sleep(random.uniform(20, 40))
+                        print(f"  Saved! actions: {actions_done}/{MAX_ACTIONS_PER_RUN}")
+                        await asyncio.sleep(random.uniform(8, 12))
 
                 except Exception as e:
-                    print(f"  Post error: {e}")
+                    print(f"  Error: {e}")
                     continue
 
-            await asyncio.sleep(random.uniform(5, 10))
+            await asyncio.sleep(3)
 
         print(f"\n{'='*50}")
         print(f"Done! Actions: {actions_done}")
         print(f"{'='*50}")
         await browser.close()
 
-# ============================================================
-# RUN
-# ============================================================
 asyncio.run(run_watcher())
