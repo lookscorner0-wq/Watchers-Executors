@@ -1,5 +1,5 @@
 # ============================================================
-# linkedin_watcher.py — FAST VERSION
+# linkedin_watcher.py — FINAL VERSION
 # ============================================================
 
 import os
@@ -18,10 +18,8 @@ MAX_ACTIONS_PER_RUN = 5
 
 KEYWORDS = [
     "need lead generation",
-    "looking for automation",
     "need chatbot",
-    "want AI agent",
-    "hire marketing agency",
+    "looking for automation",
 ]
 
 USER_AGENTS = [
@@ -76,20 +74,23 @@ OUTPUT FORMAT FOR DMs:
 """
 
 # ============================================================
-# 48 HOUR FILTER
+# 24 HOUR FILTER
 # ============================================================
 def is_post_recent(time_text):
     if not time_text:
         return False
     t = time_text.lower().strip()
+    # Minutes = always recent
     if 'm' in t and 'h' not in t and 'd' not in t:
         return True
+    # Hours — max 23
     if 'h' in t:
         try:
-            return int(''.join(filter(str.isdigit, t))) <= 47
+            return int(''.join(filter(str.isdigit, t))) <= 23
         except:
             return True
-    if '1d' in t or '2d' in t:
+    # Only 1d accepted
+    if '1d' in t:
         return True
     return False
 
@@ -159,8 +160,13 @@ def get_client_type(text):
 
 def is_relevant(post_text):
     result = call_openai([
-        {"role": "system", "content": "You are a lead qualification expert. Reply ONLY: relevant: yes OR relevant: no"},
-        {"role": "user",   "content": f"Does this post need AI automation, chatbots, lead generation, or workflow services?\n\nPost: {post_text[:200]}"}
+        {"role": "system", "content": (
+            "You are a lead qualification expert for an AI Automation Agency. "
+            "Reply ONLY: relevant: yes OR relevant: no. "
+            "relevant: yes ONLY if the person is LOOKING TO HIRE or BUY a service. "
+            "relevant: no if they are posting a job listing, sharing tips, or just discussing."
+        )},
+        {"role": "user", "content": f"Post: {post_text[:200]}"}
     ], max_tokens=10, temperature=0.1)
     return "relevant: yes" in result.lower()
 
@@ -205,14 +211,14 @@ async def human_type(element, text):
         await element.type(char, delay=random.randint(50, 100))
 
 async def safe_goto(page, url):
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(3)
             return True
         except Exception as e:
             print(f"  Goto attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
     return False
 
 # ============================================================
@@ -227,6 +233,7 @@ async def comment_on_post(page, card, comment_text):
             'button[aria-label*="comment"], button:has-text("Comment")'
         )
         if not comment_btn:
+            print(f"  Comment button not found")
             return False
 
         await comment_btn.click()
@@ -236,9 +243,11 @@ async def comment_on_post(page, card, comment_text):
             'div.ql-editor, div[contenteditable="true"]'
         )
         if not comment_box:
+            print(f"  Comment box not found")
             return False
 
-        await comment_box.click()
+        # JS click — bypass interception
+        await page.evaluate("el => el.click()", comment_box)
         await asyncio.sleep(1)
         await human_type(comment_box, comment_text)
         await asyncio.sleep(2)
@@ -249,7 +258,7 @@ async def comment_on_post(page, card, comment_text):
         if not submit_btn:
             await comment_box.press("Control+Enter")
         else:
-            await submit_btn.click()
+            await page.evaluate("el => el.click()", submit_btn)
 
         await asyncio.sleep(2)
         print(f"  Comment posted!")
@@ -268,54 +277,71 @@ async def dm_company(page, profile_url, dm_text):
         if not ok:
             return False
 
+        # Message button
         msg_btn = await page.query_selector(
             'button:has-text("Message"), a:has-text("Message")'
         )
         if not msg_btn:
             dots = await page.query_selector('button[aria-label*="More"]')
             if dots:
-                await dots.click()
+                await page.evaluate("el => el.click()", dots)
                 await asyncio.sleep(1)
                 msg_btn = await page.query_selector(
                     'li:has-text("Message"), div:has-text("Send message")'
                 )
         if not msg_btn:
+            print(f"  Message button not found")
             return False
 
-        await msg_btn.click()
+        await page.evaluate("el => el.click()", msg_btn)
         await asyncio.sleep(2)
 
+        # Topic dropdown
         for topic in ["Service Request", "Request a Demo", "General Inquiry"]:
             try:
                 opt = await page.query_selector(
                     f'option:has-text("{topic}"), li:has-text("{topic}")'
                 )
                 if opt:
-                    await opt.click()
+                    await page.evaluate("el => el.click()", opt)
                     await asyncio.sleep(1)
+                    print(f"  Topic: {topic}")
                     break
             except:
                 continue
 
-        msg_box = await page.query_selector(
-            'textarea, div[contenteditable="true"]'
-        )
+        # Message box — try multiple selectors
+        msg_box = await page.query_selector('div[aria-label="Write a message…"]')
         if not msg_box:
+            msg_box = await page.query_selector('div.msg-form__contenteditable')
+        if not msg_box:
+            msg_box = await page.query_selector('textarea')
+        if not msg_box:
+            print(f"  Message box not found")
             return False
 
-        await msg_box.click()
+        # JS click + focus
+        await page.evaluate("el => { el.click(); el.focus(); }", msg_box)
         await asyncio.sleep(1)
         await human_type(msg_box, dm_text)
         await asyncio.sleep(2)
 
+        # Send button
         send_btn = await page.query_selector(
-            'button:has-text("Send message"), button:has-text("Send")'
+            'button.msg-form__send-button, '
+            'button[aria-label="Send"], '
+            'button:has-text("Send message")'
         )
+        if not send_btn:
+            send_btn = await page.query_selector('button:has-text("Send")')
+
         if send_btn:
-            await send_btn.click()
+            await page.evaluate("el => el.click()", send_btn)
             await asyncio.sleep(2)
             print(f"  DM sent!")
             return True
+
+        print(f"  Send button not found")
         return False
 
     except Exception as e:
@@ -342,9 +368,10 @@ async def run_watcher():
         await context.add_cookies(get_cookies())
         page = await context.new_page()
 
-        await safe_goto(page, "https://www.linkedin.com/feed/")
-        if "feed" not in page.url:
-            print("Session expired!")
+        # Login check
+        ok = await safe_goto(page, "https://www.linkedin.com/feed/")
+        if not ok or "feed" not in page.url:
+            print("Session expired — refresh cookies!")
             await browser.close()
             return
 
@@ -356,13 +383,17 @@ async def run_watcher():
                 break
 
             print(f"\nSearching: '{keyword}'")
-            search_url = f"https://www.linkedin.com/search/results/content/?keywords={keyword.replace(' ', '%20')}&sortBy=date_posted"
+            search_url = (
+                f"https://www.linkedin.com/search/results/content/"
+                f"?keywords={keyword.replace(' ', '%20')}&sortBy=date_posted"
+            )
 
             ok = await safe_goto(page, search_url)
             if not ok:
+                print(f"  Search failed — skip")
                 continue
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(4)
             for _ in range(2):
                 await page.evaluate("window.scrollBy(0, 600)")
                 await asyncio.sleep(1)
@@ -379,15 +410,16 @@ async def run_watcher():
                 i   += 1
 
                 try:
-                    # Time filter
+                    # 24 hour filter
                     time_el   = await card.query_selector(
-                        '.update-components-actor__sub-description span:not(.visually-hidden)'
+                        '.update-components-actor__sub-description '
+                        'span:not(.visually-hidden)'
                     )
                     time_text = await time_el.inner_text() if time_el else ""
                     time_text = time_text.strip().split('•')[0].strip()
 
                     if not is_post_recent(time_text):
-                        print(f"  Old post ({time_text}) — skip")
+                        print(f"  Old ({time_text}) — skip")
                         continue
 
                     # Post text
@@ -413,10 +445,12 @@ async def run_watcher():
                     if not profile_url:
                         continue
 
+                    # Duplicate check
                     if is_already_contacted(profile_url):
                         print(f"  Already contacted — skip")
                         continue
 
+                    # GPT qualify
                     if not is_relevant(post_text):
                         print(f"  Not relevant — skip")
                         continue
@@ -428,20 +462,22 @@ async def run_watcher():
                     author_name = await author_el.inner_text() if author_el else "Unknown"
                     author_name = author_name.strip().split('\n')[0]
 
-                    print(f"  {author_name} | {client_type} | Company:{is_company} | {time_text}")
+                    print(f"  {author_name} | {client_type} | "
+                          f"Company:{is_company} | {time_text}")
 
                     post_url = page.url.split('?')[0]
                     success  = False
 
                     if is_company:
                         dm_text  = generate_dm(post_text, client_type)
+                        print(f"  → DM: {dm_text[:80]}...")
                         success  = await dm_company(page, profile_url, dm_text)
                         message  = dm_text
                         msg_type = "dm"
 
                         # Reload search after DM
                         await safe_goto(page, search_url)
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(4)
                         for _ in range(2):
                             await page.evaluate("window.scrollBy(0, 600)")
                             await asyncio.sleep(1)
@@ -449,6 +485,7 @@ async def run_watcher():
 
                     else:
                         comment_text = generate_comment(post_text, client_type)
+                        print(f"  → Comment: {comment_text[:80]}...")
                         success  = await comment_on_post(page, card, comment_text)
                         message  = comment_text
                         msg_type = "comment"
@@ -477,12 +514,13 @@ async def run_watcher():
                         })
                         supabase_insert("agent_logs", {
                             "agent_name": "linkedin_watcher",
-                            "action":     f"{'DM' if is_company else 'Comment'} to {author_name}",
+                            "action":     f"{'DM' if is_company else 'Comment'} "
+                                         f"to {author_name}",
                             "details":    profile_url,
                             "status":     "success"
                         })
 
-                        print(f"  Saved! actions: {actions_done}/{MAX_ACTIONS_PER_RUN}")
+                        print(f"  Saved! {actions_done}/{MAX_ACTIONS_PER_RUN}\n")
                         await asyncio.sleep(random.uniform(8, 12))
 
                 except Exception as e:
