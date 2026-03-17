@@ -504,16 +504,16 @@ async def run_watcher():
                         message  = comment_text
                         msg_type = "comment"
 
-                       comment_id = await page.evaluate("""
-                           () => {
-                               const items = document.querySelectorAll('.comments-comment-item');
-                               for (const c of items) {
-                                   if (c.getAttribute('data-id')) return c.getAttribute('data-id');
-                               }
-                               return null;
-                           }
-                       """)
-                       print(f"  Comment ID: {comment_id}")
+                        comment_id = await page.evaluate("""
+                            () => {
+                                const items = document.querySelectorAll('.comments-comment-item');
+                                for (const c of items) {
+                                    if (c.getAttribute('data-id')) return c.getAttribute('data-id');
+                                }
+                                return null;
+                            }
+                        """)
+                        print(f"  Comment ID: {comment_id}")
                     
                     if success:
                         actions_done += 1
