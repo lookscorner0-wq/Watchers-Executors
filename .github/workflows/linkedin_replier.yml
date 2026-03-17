@@ -1,0 +1,36 @@
+name: LinkedIn Replier
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: linkedin-agent          # 🔐 Same shared lock as Watcher
+  cancel-in-progress: false      # ⏳ Queues itself, waits for Watcher to finish
+
+jobs:
+  replier:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      - name: Run LinkedIn Replier
+        env:
+          LI_AT:         ${{ secrets.LI_AT }}
+          LI_JSESSIONID: ${{ secrets.LI_JSESSIONID }}
+          OPENAI_KEY:    ${{ secrets.OPENAI_KEY }}
+          SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
+        run: python linkedin_replier.py
