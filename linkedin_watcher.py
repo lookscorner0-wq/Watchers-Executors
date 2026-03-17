@@ -71,30 +71,31 @@ OUTPUT FORMAT FOR DMs:
 # KEYWORD GENERATOR
 # ============================================================
 def generate_keywords():
-    result = call_openai([
-        {"role": "system", "content": (
-            "Generate 3 LinkedIn search keywords. "
-            "Rules: "
-            "1. Each keyword 2-4 words only. "
-            "2. Must include words like: anyone recommend, struggling with, "
-            "need help with, can someone help, how do I automate, "
-            "looking to automate, need a bot, need automation. "
-            "3. Topics: chatbots, lead generation, workflow automation, "
-            "WhatsApp bots, social media automation, N8N, Zapier. "
-            "4. These exact phrase patterns work on LinkedIn: "
-            "'anyone recommend automation tool', 'struggling with lead gen', "
-            "'need WhatsApp bot', 'how to automate follow ups'. "
-            "Reply ONLY comma separated. Nothing else."
-        )},
-        {"role": "user", "content": "Generate 3 keywords now."}
-    ], max_tokens=25, temperature=0.9)
-
-    keywords = [k.strip().lower() for k in result.split(",") if k.strip()]
-    if len(keywords) < 3:
-        keywords = ["need WhatsApp bot", "struggling with leads", "anyone recommend automation"]
+    KEYWORDS_POOL = [
+        "need AI automation",
+        "need lead generation",
+        "need chatbot",
+        "need WhatsApp bot",
+        "need workflow automation",
+        "struggling with leads",
+        "struggling with follow ups",
+        "need n8n help",
+        "need zapier automation",
+        "need make automation",
+        "want AI agent",
+        "need social media automation",
+        "need email automation",
+        "need CRM automation",
+        "automate my business",
+        "need outreach automation",
+        "need appointment bot",
+        "need customer support bot",
+        "want chatbot for website",
+        "need marketing automation",
+    ]
+    keywords = random.sample(KEYWORDS_POOL, 4)
     print(f"Keywords this run: {keywords}")
-    return keywords[:3]
-
+    return keywords
 # ============================================================
 # 24 HOUR FILTER
 # ============================================================
@@ -402,9 +403,6 @@ async def run_watcher():
         print("Session valid!\n")
         actions_done = 0
         KEYWORDS = generate_keywords()
-        for keyword in KEYWORDS:
-            if actions_done >= MAX_ACTIONS_PER_RUN:
-                break
 
             print(f"\nSearching: '{keyword}'")
             search_url = (
