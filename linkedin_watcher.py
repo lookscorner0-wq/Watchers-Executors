@@ -403,6 +403,7 @@ async def run_watcher():
         print("Session valid!\n")
         actions_done = 0
         KEYWORDS = generate_keywords()
+        for keyword in KEYWORDS:
 
             print(f"\nSearching: '{keyword}'")
             search_url = (
