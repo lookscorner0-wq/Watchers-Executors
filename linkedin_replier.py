@@ -1,8 +1,7 @@
 # ============================================================
-# linkedin_replier.py
+# linkedin_replier.py — UPDATED VERSION
 # NoErrors AI Automation Agency — LinkedIn Replier Agent
-# Handles ALL replies — DMs + Comment replies
-# Watcher handles first outreach ONLY
+# Notification-based approach + Full context reading
 # ============================================================
 
 import os
@@ -69,7 +68,7 @@ CONVERSATION GOAL:
 SPECIAL CASES:
 - If client says DM me / message me / inbox me:
   Reply: "Sure! Sending you a connection request with a note now."
-  
+
 - If client says WhatsApp me / contact on WhatsApp:
   Reply: "Happy to connect on WhatsApp! Could you share your number? I will reach out right away."
 
@@ -138,14 +137,13 @@ def supabase_update(table, match_col, match_val, data):
         print(f"Supabase update error: {e}")
         return False
 
-def get_conversation(profile_url):
-    rows = supabase_get("conversations", {
+def get_supabase_conversation(profile_url):
+    return supabase_get("conversations", {
         "profile_url": f"eq.{profile_url}",
         "select":      "*",
         "order":       "timestamp.desc",
         "limit":       "10"
     })
-    return rows
 
 def get_case_studies(service_keyword):
     try:
@@ -168,19 +166,28 @@ def get_case_studies(service_keyword):
     except:
         return ""
 
+def is_already_replied(profile_url, message_type):
+    rows = supabase_get("conversations", {
+        "profile_url":  f"eq.{profile_url}",
+        "sender":       "eq.agent",
+        "message_type": f"eq.{message_type}",
+        "select":       "conv_id"
+    })
+    return len(rows) > 0
+
 def notify_manager(signal, profile_url, client_name, client_type, reply_text, their_message):
     supabase_insert("agent_signals", {
         "from_agent":  "linkedin_replier",
         "to_agent":    "manager_agent",
         "signal_type": f"{signal.lower()}_alert",
         "payload":     str({
-            "platform":     "linkedin",
-            "client_name":  client_name,
-            "profile_url":  profile_url,
-            "client_type":  client_type,
+            "platform":      "linkedin",
+            "client_name":   client_name,
+            "profile_url":   profile_url,
+            "client_type":   client_type,
             "their_message": their_message,
-            "our_reply":    reply_text,
-            "signal":       signal
+            "our_reply":     reply_text,
+            "signal":        signal
         }),
         "status": "pending"
     })
@@ -223,27 +230,50 @@ def detect_signal(text):
     return None
 
 def detect_dm_request(text):
-    text = text.lower()
-    return any(x in text for x in ["dm me", "message me", "inbox me",
-                                    "send me a message", "private message",
-                                    "direct message"])
+    return any(x in text.lower() for x in ["dm me", "message me", "inbox me",
+                                             "send me a message", "private message",
+                                             "direct message"])
 
 def detect_whatsapp_request(text):
-    text = text.lower()
-    return any(x in text for x in ["whatsapp", "whats app", "wa me",
-                                    "contact on whatsapp", "whatsapp me"])
+    return any(x in text.lower() for x in ["whatsapp", "whats app", "wa me",
+                                             "contact on whatsapp", "whatsapp me"])
 
 def detect_proof_request(text):
-    text = text.lower()
-    return any(x in text for x in ["proof", "results", "case study", "portfolio",
-                                    "past work", "examples", "references",
-                                    "have you done", "show me", "experience"])
+    return any(x in text.lower() for x in ["proof", "results", "case study", "portfolio",
+                                             "past work", "examples", "references",
+                                             "have you done", "show me", "experience"])
 
-def generate_reply(their_message, conversation_history, client_type, case_studies=""):
-    history_text = ""
-    for msg in conversation_history[-6:]:
-        role          = "Bilal" if msg.get("sender") == "agent" else "Client"
-        history_text += f"{role}: {msg.get('message','')}\n"
+def get_client_type(text):
+    text = text.lower()
+    if any(x in text for x in ["enterprise","fortune","global","multinational","corporate"]):
+        return "Opportunity"
+    if any(x in text for x in ["startup","saas","growing","series a","scale up","agency"]):
+        return "GoodClient"
+    return "Main Client"
+
+# ============================================================
+# GENERATE REPLY — FULL CONTEXT
+# ============================================================
+def generate_reply(their_message, context, client_type, case_studies=""):
+    """
+    context dict:
+      - dm_history: list of {role, text} from LinkedIn directly
+      - post_description: post text (for comment replies)
+      - our_comment: what we first said (for comment replies)
+    """
+    context_text = ""
+
+    # DM history from LinkedIn (most accurate)
+    if context.get("dm_history"):
+        context_text += "=== DM Conversation History ===\n"
+        for msg in context["dm_history"]:
+            context_text += f"{msg['role']}: {msg['text']}\n"
+
+    # Comment context
+    if context.get("post_description"):
+        context_text += f"\n=== Original Post ===\n{context['post_description']}\n"
+    if context.get("our_comment"):
+        context_text += f"\n=== Our First Comment ===\n{context['our_comment']}\n"
 
     extra = f"\n\nRelevant case studies:\n{case_studies}" if case_studies else ""
     temp  = 0.3 if client_type == "Opportunity" else 0.5
@@ -251,13 +281,14 @@ def generate_reply(their_message, conversation_history, client_type, case_studie
     reply = call_openai([
         {"role": "system", "content": SYSTEM_PROMPT + extra},
         {"role": "user",   "content": (
-            f"Conversation history:\n{history_text}\n\n"
+            f"{context_text}\n\n"
             f"Client just said: {their_message}\n"
             f"Client type: {client_type}\n\n"
             f"Write next reply. Max 3 sentences. Plain text only. "
-            f"No price. Continue conversation naturally."
+            f"No price. Continue conversation naturally based on full context."
         )}
     ], max_tokens=120, temperature=temp)
+
     return reply.replace("**","").replace("*","").replace("#","").replace("\n"," ")
 
 def generate_connect_note(their_message, client_type):
@@ -268,11 +299,11 @@ def generate_connect_note(their_message, client_type):
             f"Client type: {client_type}\n\n"
             f"Write a LinkedIn connection request note. "
             f"Mention you are Bilal from their comment. "
-            f"Max 280 chars. Plain text only. Sparky and curious."
+            f"Max 280 chars. Plain text only."
         )}
     ], max_tokens=80, temperature=0.6)
     note = note.replace("**","").replace("*","").replace("#","").replace("\n"," ")
-    return note[:280] if len(note) > 280 else note
+    return note[:280]
 
 # ============================================================
 # BROWSER HELPERS
@@ -291,8 +322,164 @@ async def human_type(element, text):
         if random.random() < 0.05:
             await asyncio.sleep(random.uniform(0.2, 0.5))
 
+async def dismiss_cookie_banner(page):
+    try:
+        btn = await page.query_selector('button:has-text("Accept")')
+        if btn:
+            await btn.click()
+            await asyncio.sleep(1)
+    except:
+        pass
+
 # ============================================================
-# SEND CONNECT REQUEST WITH NOTE
+# READ FULL DM HISTORY FROM LINKEDIN
+# ============================================================
+async def read_dm_history(page, conv_url):
+    """
+    Scrolls up to load full DM history
+    Returns list of {role: 'Bilal'/'Client', text: '...'}
+    """
+    try:
+        await page.goto(conv_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(4, 5))
+
+        # Scroll up multiple times to load older messages
+        msg_container = await page.query_selector(
+            '.msg-s-message-list, .msg-s-message-list-container'
+        )
+        if msg_container:
+            for _ in range(5):
+                await page.evaluate(
+                    "el => el.scrollTop = 0", msg_container
+                )
+                await asyncio.sleep(1.5)
+
+        # Extract all messages with sender info
+        history = await page.evaluate("""
+            () => {
+                const messages = [];
+                const groups = document.querySelectorAll(
+                    '.msg-s-message-group, .msg-s-message-list__event'
+                );
+
+                for (const group of groups) {
+                    // Check if message is ours (right side) or theirs (left side)
+                    const isMine = group.classList.contains('msg-s-message-group--outbound')
+                                || !!group.querySelector('.msg-s-message-group__meta');
+
+                    const msgEls = group.querySelectorAll(
+                        '.msg-s-event-listitem__body, .msg-s-event__content'
+                    );
+
+                    for (const el of msgEls) {
+                        const text = el.innerText?.trim();
+                        if (text) {
+                            messages.push({
+                                role: isMine ? 'Bilal' : 'Client',
+                                text: text
+                            });
+                        }
+                    }
+                }
+                return messages;
+            }
+        """)
+
+        print(f"    DM history loaded: {len(history)} messages")
+        return history
+
+    except Exception as e:
+        print(f"    DM history error: {e}")
+        return []
+
+# ============================================================
+# READ POST CONTEXT (description + our comment)
+# ============================================================
+async def read_post_context(page, post_url, comment_id=None):
+    """
+    Goes to post, reads:
+    - Post description
+    - Our comment (by comment_id or fallback text search)
+    Returns dict {post_description, our_comment}
+    """
+    try:
+        await page.goto(post_url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(4, 6))
+        await dismiss_cookie_banner(page)
+
+        # Read post description
+        post_description = await page.evaluate("""
+            () => {
+                const el = document.querySelector(
+                    '.feed-shared-update-v2__description, '
+                    '.feed-shared-text, '
+                    'span.break-words'
+                );
+                return el ? el.innerText.trim() : '';
+            }
+        """)
+
+        # Load all comments — click "Load more comments" in loop
+        for _ in range(5):
+            load_more = await page.query_selector(
+                'button:has-text("Load more comments"), '
+                'button:has-text("Show more comments")'
+            )
+            if not load_more:
+                break
+            await load_more.click()
+            await asyncio.sleep(2)
+
+        # Find our comment
+        # Method 1: by comment_id (data-id) — most accurate
+        our_comment = ""
+        if comment_id:
+            our_comment = await page.evaluate(f"""
+                () => {{
+                    const el = document.querySelector('[data-id="{comment_id}"]');
+                    if (el) {{
+                        const textEl = el.querySelector(
+                            '.comments-comment__main-content, '
+                            '.comments-comment-item__main-content'
+                        );
+                        return textEl ? textEl.innerText.trim() : '';
+                    }}
+                    return '';
+                }}
+            """)
+
+        # Method 2: fallback — search by "Bilal" or "NoError"
+        if not our_comment:
+            our_comment = await page.evaluate("""
+                () => {
+                    const items = document.querySelectorAll('.comments-comment-item');
+                    for (const item of items) {
+                        if (item.innerText.includes('Bilal') ||
+                            item.innerText.includes('NoError')) {
+                            const textEl = item.querySelector(
+                                '.comments-comment__main-content, '
+                                '.comments-comment-item__main-content'
+                            );
+                            return textEl ? textEl.innerText.trim() : '';
+                        }
+                    }
+                    return '';
+                }
+            """)
+
+        print(f"    Post description: {post_description[:60]}...")
+        print(f"    Our comment: {our_comment[:60]}...")
+        return {
+            "post_description": post_description,
+            "our_comment":      our_comment
+        }
+
+    except Exception as e:
+        print(f"    Post context error: {e}")
+        return {"post_description": "", "our_comment": ""}
+
+# ============================================================
+# SEND CONNECT WITH NOTE
 # ============================================================
 async def send_connect_with_note(page, profile_url, note_text):
     try:
@@ -310,13 +497,11 @@ async def send_connect_with_note(page, profile_url, note_text):
                 connect_btn = await page.query_selector('li:has-text("Connect")')
 
         if not connect_btn:
-            print(f"  Connect button not found")
             return False
 
         await connect_btn.click()
         await asyncio.sleep(random.uniform(2, 3))
 
-        # Add note button
         add_note_btn = await page.query_selector(
             'button:has-text("Add a note"), button[aria-label*="note"]'
         )
@@ -324,12 +509,7 @@ async def send_connect_with_note(page, profile_url, note_text):
             await add_note_btn.click()
             await asyncio.sleep(2)
 
-        note_box = await page.query_selector(
-            'textarea[name="message"], textarea#custom-message'
-        )
-        if not note_box:
-            note_box = await page.query_selector('textarea')
-
+        note_box = await page.query_selector('textarea[name="message"], textarea')
         if note_box:
             await note_box.click()
             await asyncio.sleep(1)
@@ -352,58 +532,81 @@ async def send_connect_with_note(page, profile_url, note_text):
         return False
 
 # ============================================================
-# REPLY TO COMMENT
+# REPLY TO COMMENT ON POST
 # ============================================================
-async def reply_to_comment(page, post_url, reply_text):
+async def reply_to_comment(page, post_url, reply_text, comment_id=None):
     try:
         await page.goto(post_url, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(5, 7))
+        await dismiss_cookie_banner(page)
 
-        # Find our comment and click Reply
-        our_comment = await page.query_selector(
-            '.comments-comment-item:has-text("Bilal"), '
-            '.comments-comment-item:has-text("NoError")'
-        )
+        # Load all comments first
+        for _ in range(5):
+            load_more = await page.query_selector(
+                'button:has-text("Load more comments"), '
+                'button:has-text("Show more comments")'
+            )
+            if not load_more:
+                break
+            await load_more.click()
+            await asyncio.sleep(2)
 
-        if not our_comment:
-            # Fallback — find first Reply button
-            our_comment = await page.query_selector('.comments-comment-item')
+        # Find our comment
+        our_comment_el = None
 
-        if not our_comment:
-            print(f"  Our comment not found on post")
+        # Method 1: by comment_id
+        if comment_id:
+            our_comment_el = await page.query_selector(f'[data-id="{comment_id}"]')
+
+        # Method 2: fallback text search
+        if not our_comment_el:
+            items = await page.query_selector_all('.comments-comment-item')
+            for item in items:
+                text = await item.inner_text()
+                if 'Bilal' in text or 'NoError' in text:
+                    our_comment_el = item
+                    break
+
+        if not our_comment_el:
+            print(f"  Our comment not found!")
             return False
 
-        reply_btn = await our_comment.query_selector(
+        # Click Reply
+        reply_btn = await our_comment_el.query_selector(
             'button:has-text("Reply"), button[aria-label*="Reply"]'
         )
         if not reply_btn:
-            print(f"  Reply button not found")
             return False
 
         await reply_btn.click()
         await asyncio.sleep(random.uniform(2, 3))
 
         reply_box = await page.query_selector(
-            'div.ql-editor, div[contenteditable="true"]'
+            'div.ql-editor[contenteditable="true"], div[contenteditable="true"]'
         )
         if not reply_box:
             return False
 
-        await reply_box.click()
+        await page.evaluate("el => { el.click(); el.focus(); }", reply_box)
         await asyncio.sleep(1)
         await human_type(reply_box, reply_text)
         await asyncio.sleep(random.uniform(2, 3))
 
-        submit_btn = await page.query_selector(
-            'button.comments-comment-box__submit-button'
-        )
-        if not submit_btn:
-            await reply_box.press("Control+Return")
-        else:
-            await submit_btn.click()
+        # Submit
+        for selector in [
+            'button.comments-comment-box__submit-button',
+            'button[class*="submit"]',
+        ]:
+            btn = await page.query_selector(selector)
+            if btn:
+                await page.evaluate("el => el.click()", btn)
+                await asyncio.sleep(3)
+                print(f"  Comment reply posted!")
+                return True
 
+        await reply_box.press("Control+Enter")
         await asyncio.sleep(3)
-        print(f"  Comment reply posted!")
+        print(f"  Comment reply posted via Ctrl+Enter!")
         return True
 
     except Exception as e:
@@ -426,12 +629,12 @@ async def reply_to_dm(page, conv_url, reply_text):
         if not msg_box:
             return False
 
-        await msg_box.click()
+        await page.evaluate("el => { el.click(); el.focus(); }", msg_box)
         await asyncio.sleep(1)
         await human_type(msg_box, reply_text)
         await asyncio.sleep(random.uniform(2, 3))
 
-        send_btn = await page.evaluate("""
+        sent = await page.evaluate("""
             () => {
                 const btn = Array.from(document.querySelectorAll('button'))
                     .find(b => b.innerText.trim() === 'Send' && !b.disabled);
@@ -441,7 +644,7 @@ async def reply_to_dm(page, conv_url, reply_text):
         """)
 
         await asyncio.sleep(2)
-        if send_btn:
+        if sent:
             print(f"  DM reply sent!")
             return True
         return False
@@ -451,7 +654,7 @@ async def reply_to_dm(page, conv_url, reply_text):
         return False
 
 # ============================================================
-# PROCESS INBOX DMs
+# PROCESS INBOX DMs — WITH FULL HISTORY SCROLL
 # ============================================================
 async def process_inbox(page):
     print("\n--- Checking Inbox DMs ---")
@@ -477,14 +680,32 @@ async def process_inbox(page):
 
         for conv in unread_convs:
             try:
-                await page.goto(conv['url'], wait_until="domcontentloaded")
-                await asyncio.sleep(random.uniform(4, 6))
+                print(f"\n  Processing: {conv['name']}")
 
-                # Get profile URL from conversation
+                # ── Step 1: Read FULL DM history from LinkedIn
+                dm_history = await read_dm_history(page, conv['url'])
+
+                if not dm_history:
+                    continue
+
+                # ── Step 2: Get last client message
+                last_client_msg = ""
+                for msg in reversed(dm_history):
+                    if msg['role'] == 'Client':
+                        last_client_msg = msg['text']
+                        break
+
+                if not last_client_msg:
+                    continue
+
+                print(f"  Last msg: {last_client_msg[:60]}")
+
+                # ── Step 3: Get profile URL
                 profile_url = await page.evaluate("""
                     () => {
                         const link = document.querySelector(
-                            '.msg-thread__link-to-profile, a[href*="/in/"], a[href*="/company/"]'
+                            '.msg-thread__link-to-profile, '
+                            'a[href*="/in/"], a[href*="/company/"]'
                         );
                         return link ? link.href.split('?')[0] : null;
                     }
@@ -493,101 +714,73 @@ async def process_inbox(page):
                 if not profile_url:
                     continue
 
-                # Get last client message
-                messages = await page.evaluate("""
-                    () => {
-                        return Array.from(document.querySelectorAll('.msg-s-message-list__event'))
-                            .map(m => ({
-                                text:    m.querySelector('.msg-s-event-listitem__body')?.innerText?.trim() || '',
-                                is_mine: !!m.querySelector('.msg-s-message-group__meta')
-                            }))
-                            .filter(m => m.text);
-                    }
-                """)
+                # ── Step 4: Client type from Supabase or detect from history
+                supabase_history = get_supabase_conversation(profile_url)
+                client_type = (
+                    supabase_history[0].get('client_type', 'Main Client')
+                    if supabase_history
+                    else get_client_type(' '.join([m['text'] for m in dm_history]))
+                )
 
-                if not messages:
-                    continue
-
-                # Find last client message
-                last_client_msg = ""
-                for msg in reversed(messages):
-                    if not msg['is_mine']:
-                        last_client_msg = msg['text']
-                        break
-
-                if not last_client_msg:
-                    continue
-
-                print(f"  From: {conv['name']} | Message: {last_client_msg[:60]}")
-
-                # Get conversation history from Supabase
-                history     = get_conversation(profile_url)
-                client_type = history[0].get('client_type', 'Main Client') if history else 'Main Client'
-
-                # Detect special requests
+                # ── Step 5: Detect special requests
                 if detect_whatsapp_request(last_client_msg):
-                    reply = "Happy to connect on WhatsApp! Could you share your number? I will reach out right away."
+                    reply  = "Happy to connect on WhatsApp! Could you share your number? I will reach out right away."
                     signal = "Green"
 
                 elif detect_dm_request(last_client_msg):
-                    reply = "Sure, I am already here in your DMs! What would you like to discuss?"
+                    reply  = "Sure, I am already here in your DMs! What would you like to discuss?"
                     signal = "Green"
 
                 else:
-                    # Detect signal
                     signal = detect_signal(last_client_msg)
-
-                    # Case studies if needed
-                    case_studies = ""
-                    if detect_proof_request(last_client_msg):
-                        service_kw   = "chatbot" if "chatbot" in last_client_msg.lower() else \
-                                       "lead" if "lead" in last_client_msg.lower() else \
-                                       "workflow" if "workflow" in last_client_msg.lower() else \
-                                       "content"
-                        case_studies = get_case_studies(service_kw)
 
                     if signal == "Red":
                         print(f"  Red signal — closing")
                         supabase_update("conversations", "profile_url", profile_url,
                                        {"status": "closed"})
-                        supabase_insert("agent_logs", {
-                            "agent_name": "linkedin_replier",
-                            "action":     f"Red signal from {conv['name']}",
-                            "details":    profile_url,
-                            "status":     "closed"
-                        })
                         continue
 
-                    reply = generate_reply(last_client_msg, history, client_type, case_studies)
+                    # Case studies if needed
+                    case_studies = ""
+                    if detect_proof_request(last_client_msg):
+                        kw = ("chatbot"  if "chatbot"  in last_client_msg.lower() else
+                              "lead"     if "lead"     in last_client_msg.lower() else
+                              "workflow" if "workflow" in last_client_msg.lower() else
+                              "content")
+                        case_studies = get_case_studies(kw)
 
-                # Send reply
+                    # ── Generate reply with FULL DM context
+                    reply = generate_reply(
+                        their_message = last_client_msg,
+                        context       = {"dm_history": dm_history},
+                        client_type   = client_type,
+                        case_studies  = case_studies
+                    )
+
+                # ── Step 6: Send reply
                 success = await reply_to_dm(page, conv['url'], reply)
 
                 if success:
-                    # Save to Supabase
                     supabase_insert("conversations", {
-                        "platform":    "linkedin",
-                        "profile_url": profile_url,
-                        "message":     last_client_msg,
-                        "sender":      "client",
+                        "platform":     "linkedin",
+                        "profile_url":  profile_url,
+                        "message":      last_client_msg,
+                        "sender":       "client",
                         "message_type": "dm",
-                        "status":      "conversation_started"
+                        "status":       "conversation_started"
                     })
                     supabase_insert("conversations", {
-                        "platform":    "linkedin",
-                        "profile_url": profile_url,
-                        "client_type": client_type,
-                        "message":     reply,
-                        "sender":      "agent",
+                        "platform":     "linkedin",
+                        "profile_url":  profile_url,
+                        "client_type":  client_type,
+                        "message":      reply,
+                        "sender":       "agent",
                         "message_type": "dm",
-                        "status":      "conversation_started"
+                        "status":       "conversation_started"
                     })
-
-                    # Update lead status
                     supabase_update("leads_queue", "potential_client_profile", profile_url,
                                    {"status": "warm" if signal == "Green" else "active"})
 
-                    # Notify manager if Green or Yellow
                     if signal in ["Green", "Yellow"]:
                         notify_manager(signal, profile_url, conv['name'],
                                       client_type, reply, last_client_msg)
@@ -609,165 +802,208 @@ async def process_inbox(page):
         print(f"  Inbox error: {e}")
 
 # ============================================================
-# PROCESS COMMENT REPLIES
+# PROCESS COMMENT REPLIES — VIA NOTIFICATIONS
 # ============================================================
-async def process_comment_replies(page):
-    print("\n--- Checking Comment Replies ---")
+async def process_notifications(page):
+    print("\n--- Checking Notifications ---")
     try:
-        # Get all posts where we commented from Supabase
-        commented_posts = supabase_get("conversations", {
-            "message_type": "eq.comment",
-            "status":       "eq.approval_sent",
-            "select":       "*"
-        })
+        await page.goto("https://www.linkedin.com/notifications/", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(5, 7))
+        await dismiss_cookie_banner(page)
 
-        print(f"  Posts to check: {len(commented_posts)}")
+        # Get all reply notifications
+        notifications = await page.evaluate("""
+            () => {
+                const results = [];
+                const items = document.querySelectorAll(
+                    '.nt-card, .notification-card, '
+                    '[data-urn*="notification"], '
+                    '.artdeco-list__item'
+                );
 
-        for conv in commented_posts:
-            post_url    = conv.get('post_url', '')
-            profile_url = conv.get('profile_url', '')
-            client_type = conv.get('client_type', 'Main Client')
+                for (const item of items) {
+                    const text = item.innerText || '';
 
-            if not post_url:
-                continue
-
-            try:
-                await page.goto(post_url, wait_until="domcontentloaded")
-                await asyncio.sleep(random.uniform(5, 7))
-
-                # Get replies on our comment
-                replies = await page.evaluate("""
-                    () => {
-                        const ourComment = Array.from(
-                            document.querySelectorAll('.comments-comment-item')
-                        ).find(c =>
-                            c.innerText.includes('NoError') ||
-                            c.innerText.includes('Bilal')
-                        );
-
-                        if (!ourComment) return [];
-
-                        const replyItems = ourComment.querySelectorAll(
-                            '.comments-comment-item, .comments-reply-item'
-                        );
-
-                        return Array.from(replyItems).map(r => ({
-                            text:       r.querySelector('.comments-comment__main-content')
-                                         ?.innerText?.trim() || '',
-                            authorName: r.querySelector('.comments-post-meta__name-text')
-                                         ?.innerText?.trim() || '',
-                            authorUrl:  r.querySelector('a[href*="/in/"]')
-                                         ?.href?.split('?')[0] || ''
-                        })).filter(r => r.text && !r.text.includes('Bilal')
-                                                && !r.text.includes('NoError'));
+                    // Only process "replied to your comment" notifications
+                    if (!text.toLowerCase().includes('replied') &&
+                        !text.toLowerCase().includes('comment')) {
+                        continue;
                     }
-                """)
 
-                if not replies:
+                    // Get notification link (post URL)
+                    const link = item.querySelector('a[href*="activity"], a[href*="ugcPost"]');
+                    const postUrl = link ? link.href.split('?')[0] : '';
+
+                    // Get author name
+                    const nameEl = item.querySelector(
+                        '.nt-card__headline, .notification-card__headline, '
+                        'span[aria-hidden="true"]'
+                    );
+                    const authorName = nameEl ? nameEl.innerText.trim().split(' ')[0] : '';
+
+                    // Get author profile URL
+                    const profileLink = item.querySelector('a[href*="/in/"]');
+                    const profileUrl  = profileLink ? profileLink.href.split('?')[0] : '';
+
+                    // Check if unread
+                    const isUnread = item.classList.contains('unread') ||
+                                     !!item.querySelector('.notification-badge, .unread-indicator');
+
+                    if (postUrl && profileUrl) {
+                        results.push({
+                            postUrl,
+                            profileUrl,
+                            authorName,
+                            isUnread,
+                            notifText: text.substring(0, 100)
+                        });
+                    }
+                }
+                return results;
+            }
+        """)
+
+        # Filter unread only
+        unread_notifs = [n for n in notifications if n['isUnread']]
+        print(f"  Reply notifications: {len(unread_notifs)} unread")
+
+        for notif in unread_notifs:
+            try:
+                profile_url = notif['profileUrl']
+                post_url    = notif['postUrl']
+                author_name = notif['authorName']
+
+                print(f"\n  From: {author_name} | Post: {post_url[:50]}")
+
+                # Already replied? skip
+                if is_already_replied(profile_url, "comment_reply"):
+                    print(f"  Already replied — skip")
                     continue
 
-                print(f"  {len(replies)} replies on post")
+                # Get comment_id from Supabase
+                supabase_rows = supabase_get("conversations", {
+                    "profile_url":  f"eq.{profile_url}",
+                    "message_type": "eq.comment",
+                    "select":       "*",
+                    "limit":        "1"
+                })
+                comment_id  = supabase_rows[0].get('comment_id', None) if supabase_rows else None
+                client_type = supabase_rows[0].get('client_type', 'Main Client') if supabase_rows else 'Main Client'
 
-                for reply_item in replies:
-                    their_msg    = reply_item['text']
-                    author_name  = reply_item['authorName']
-                    author_url   = reply_item['authorUrl'] or profile_url
+                # ── Read FULL post context
+                post_context = await read_post_context(page, post_url, comment_id)
 
-                    print(f"  Reply from {author_name}: {their_msg[:60]}")
+                # ── Now get their reply text from the post
+                their_reply = await page.evaluate(f"""
+                    () => {{
+                        const items = document.querySelectorAll('.comments-comment-item');
+                        for (const item of items) {{
+                            const profileLink = item.querySelector('a[href*="/in/"]');
+                            if (profileLink && profileLink.href.includes('{profile_url.split("/in/")[-1]}')) {{
+                                const textEl = item.querySelector(
+                                    '.comments-comment__main-content, '
+                                    '.comments-comment-item__main-content'
+                                );
+                                return textEl ? textEl.innerText.trim() : '';
+                            }}
+                        }}
+                        return '';
+                    }}
+                """)
 
-                    # Check if already replied
-                    existing = supabase_get("conversations", {
-                        "profile_url": f"eq.{author_url}",
-                        "sender":      "eq.agent",
-                        "message_type": "eq.comment_reply",
-                        "select":      "conv_id"
+                if not their_reply:
+                    print(f"  Could not find their reply text — skip")
+                    continue
+
+                print(f"  Their reply: {their_reply[:60]}")
+
+                signal = detect_signal(their_reply)
+
+                # Handle special requests
+                if detect_dm_request(their_reply):
+                    note_text = generate_connect_note(their_reply, client_type)
+                    success   = await send_connect_with_note(page, profile_url, note_text)
+                    reply_msg = note_text
+                    signal    = "Green"
+
+                elif detect_whatsapp_request(their_reply):
+                    reply_msg = "Happy to connect on WhatsApp! Could you drop your number here and I will reach out right away?"
+                    success   = await reply_to_comment(page, post_url, reply_msg, comment_id)
+                    signal    = "Green"
+
+                elif signal == "Red":
+                    print(f"  Red signal — closing")
+                    supabase_update("conversations", "profile_url", profile_url,
+                                   {"status": "closed"})
+                    continue
+
+                else:
+                    case_stud = ""
+                    if detect_proof_request(their_reply):
+                        kw = ("chatbot"  if "chatbot"  in their_reply.lower() else
+                              "lead"     if "lead"     in their_reply.lower() else
+                              "workflow" if "workflow" in their_reply.lower() else
+                              "content")
+                        case_stud = get_case_studies(kw)
+
+                    # ── Generate reply with FULL post context
+                    reply_msg = generate_reply(
+                        their_message = their_reply,
+                        context       = {
+                            "post_description": post_context["post_description"],
+                            "our_comment":      post_context["our_comment"]
+                        },
+                        client_type   = client_type,
+                        case_studies  = case_stud
+                    )
+                    success = await reply_to_comment(page, post_url, reply_msg, comment_id)
+
+                if success:
+                    supabase_insert("conversations", {
+                        "platform":     "linkedin",
+                        "profile_url":  profile_url,
+                        "post_url":     post_url,
+                        "client_type":  client_type,
+                        "message":      their_reply,
+                        "sender":       "client",
+                        "message_type": "comment_reply",
+                        "status":       "conversation_started"
                     })
-                    if existing:
-                        print(f"  Already replied — skip")
-                        continue
+                    supabase_insert("conversations", {
+                        "platform":     "linkedin",
+                        "profile_url":  profile_url,
+                        "post_url":     post_url,
+                        "client_type":  client_type,
+                        "message":      reply_msg,
+                        "sender":       "agent",
+                        "message_type": "comment_reply",
+                        "status":       "conversation_started"
+                    })
+                    supabase_update("conversations", "profile_url", profile_url,
+                                   {"status": "conversation_started"})
 
-                    signal = detect_signal(their_msg)
+                    if signal in ["Green", "Yellow"]:
+                        notify_manager(signal, profile_url, author_name,
+                                      client_type, reply_msg, their_reply)
 
-                    # Handle special requests
-                    if detect_dm_request(their_msg):
-                        note_text = generate_connect_note(their_msg, client_type)
-                        print(f"  DM request detected — sending connect + note")
-                        success   = await send_connect_with_note(page, author_url, note_text)
-                        reply_msg = note_text
-                        signal    = "Green"
+                    supabase_insert("agent_logs", {
+                        "agent_name": "linkedin_replier",
+                        "action":     f"Comment replied to {author_name} | Signal: {signal}",
+                        "details":    profile_url,
+                        "status":     "success"
+                    })
 
-                    elif detect_whatsapp_request(their_msg):
-                        reply_msg = "Happy to connect on WhatsApp! Could you drop your number here and I will reach out right away?"
-                        await reply_to_comment(page, post_url, reply_msg)
-                        success   = True
-                        signal    = "Green"
-
-                    elif signal == "Red":
-                        print(f"  Red signal — skip")
-                        supabase_update("conversations", "profile_url", profile_url,
-                                       {"status": "closed"})
-                        continue
-
-                    else:
-                        history   = get_conversation(author_url) or get_conversation(profile_url)
-                        case_stud = ""
-                        if detect_proof_request(their_msg):
-                            case_stud = get_case_studies("chatbot" if "chatbot" in their_msg.lower()
-                                                         else "lead" if "lead" in their_msg.lower()
-                                                         else "workflow")
-                        reply_msg = generate_reply(their_msg, history, client_type, case_stud)
-                        success   = await reply_to_comment(page, post_url, reply_msg)
-
-                    if success:
-                        # Save messages
-                        supabase_insert("conversations", {
-                            "platform":    "linkedin",
-                            "profile_url": author_url,
-                            "post_url":    post_url,
-                            "client_type": client_type,
-                            "message":     their_msg,
-                            "sender":      "client",
-                            "message_type": "comment_reply",
-                            "status":      "conversation_started"
-                        })
-                        supabase_insert("conversations", {
-                            "platform":    "linkedin",
-                            "profile_url": author_url,
-                            "post_url":    post_url,
-                            "client_type": client_type,
-                            "message":     reply_msg,
-                            "sender":      "agent",
-                            "message_type": "comment_reply",
-                            "status":      "conversation_started"
-                        })
-
-                        # Update original conversation status
-                        supabase_update("conversations", "profile_url", profile_url,
-                                       {"status": "conversation_started"})
-
-                        # Notify manager
-                        if signal in ["Green", "Yellow"]:
-                            notify_manager(signal, author_url, author_name,
-                                          client_type, reply_msg, their_msg)
-
-                        supabase_insert("agent_logs", {
-                            "agent_name": "linkedin_replier",
-                            "action":     f"Comment replied to {author_name} | Signal: {signal}",
-                            "details":    author_url,
-                            "status":     "success"
-                        })
-
-                    await asyncio.sleep(random.uniform(15, 25))
+                await asyncio.sleep(random.uniform(15, 25))
 
             except Exception as e:
-                print(f"  Post check error: {e}")
+                print(f"  Notification error: {e}")
                 continue
 
     except Exception as e:
-        print(f"  Comment replies error: {e}")
+        print(f"  Notifications error: {e}")
 
 # ============================================================
-# MAIN REPLIER
+# MAIN
 # ============================================================
 async def run_replier():
     print(f"\n{'='*50}")
@@ -796,16 +1032,13 @@ async def run_replier():
 
         print("Session valid!\n")
 
-        # Run both checks
-        await process_inbox(page)
-        await process_comment_replies(page)
+        # ── Run both
+        await process_inbox(page)       # DMs — full history scroll
+        await process_notifications(page)  # Comment replies — via notifications
 
         print(f"\n{'='*50}")
         print(f"Replier Done!")
         print(f"{'='*50}")
         await browser.close()
 
-# ============================================================
-# RUN
-# ============================================================
 asyncio.run(run_replier())
