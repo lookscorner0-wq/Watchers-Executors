@@ -16,12 +16,6 @@ SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
 
 MAX_ACTIONS_PER_RUN = 5
 
-    keywords = [k.strip() for k in result.split(",") if k.strip()]
-    if len(keywords) < 3:
-        keywords = ["need lead generation", "need chatbot", "looking for automation"]
-    print(f"Keywords this run: {keywords}")
-    return keywords[:3]
-
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
