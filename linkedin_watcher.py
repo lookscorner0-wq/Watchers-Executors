@@ -16,21 +16,6 @@ SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
 
 MAX_ACTIONS_PER_RUN = 5
 
-def generate_keywords():
-    result = call_openai([
-        {"role": "system", "content": (
-            "You generate LinkedIn search keywords to find potential clients "
-            "for an AI Automation Agency offering: Lead Generation, Social Media "
-            "Marketing, AI Chatbots, Custom Workflows (N8N, Make, Zapier). "
-            "Generate exactly 3 short search keywords. "
-            "Each keyword must be 3-4 words MAXIMUM. "
-            "Keywords should find people LOOKING TO HIRE these services. "
-            "Reply ONLY as comma separated list. No explanation. No numbering. "
-            "Example: need chatbot built, hire automation expert, want AI agent"
-        )},
-        {"role": "user", "content": "Generate 3 fresh LinkedIn search keywords now."}
-    ], max_tokens=40, temperature=0.8)
-
     keywords = [k.strip() for k in result.split(",") if k.strip()]
     if len(keywords) < 3:
         keywords = ["need lead generation", "need chatbot", "looking for automation"]
@@ -94,26 +79,27 @@ OUTPUT FORMAT FOR DMs:
 def generate_keywords():
     result = call_openai([
         {"role": "system", "content": (
-            "Generate 3 LinkedIn search keywords for finding business owners "
-            "who need to BUY services. "
-            "RULES: "
-            "1. Each keyword max 3 words "
-            "2. Must contain words like: need, want, looking, struggling, help "
-            "3. Target BUYERS not developers or job seekers "
-            "4. Keywords must return RECENT posts on LinkedIn "
-            "5. Use simple common phrases people actually type "
-            "BAD examples: hire AI chatbot developer, looking for lead generation specialist "
-            "GOOD examples: need automation help, want chatbot, struggling with leads "
-            "Reply ONLY comma separated 3 keywords. Nothing else."
+            "Generate 3 LinkedIn search keywords. "
+            "Rules: "
+            "1. Each keyword 2-4 words only. "
+            "2. Must include words like: anyone recommend, struggling with, "
+            "need help with, can someone help, how do I automate, "
+            "looking to automate, need a bot, need automation. "
+            "3. Topics: chatbots, lead generation, workflow automation, "
+            "WhatsApp bots, social media automation, N8N, Zapier. "
+            "4. These exact phrase patterns work on LinkedIn: "
+            "'anyone recommend automation tool', 'struggling with lead gen', "
+            "'need WhatsApp bot', 'how to automate follow ups'. "
+            "Reply ONLY comma separated. Nothing else."
         )},
         {"role": "user", "content": "Generate 3 keywords now."}
     ], max_tokens=25, temperature=0.9)
 
     keywords = [k.strip().lower() for k in result.split(",") if k.strip()]
     if len(keywords) < 3:
-        keywords = ["need automation", "want chatbot", "struggling with leads"]
+        keywords = ["need WhatsApp bot", "struggling with leads", "anyone recommend automation"]
     print(f"Keywords this run: {keywords}")
-    return keywords[:4]
+    return keywords[:3]
 
 # ============================================================
 # 24 HOUR FILTER
@@ -203,10 +189,12 @@ def get_client_type(text):
 def is_relevant(post_text):
     result = call_openai([
         {"role": "system", "content": (
-            "You are a lead qualification expert for an AI Automation Agency. "
+            "You are a lead qualifier for an AI Automation Agency. "
             "Reply ONLY: relevant: yes OR relevant: no. "
-            "relevant: yes ONLY if the person is LOOKING TO HIRE or BUY a service. "
-            "relevant: no if they are posting a job listing, sharing tips, or just discussing."
+            "relevant: yes if the person mentions a business problem, "
+            "pain point, or need that AI automation, chatbots, lead generation, "
+            "or workflow tools could solve — even if they are not explicitly hiring. "
+            "relevant: no ONLY if it is purely a tip, tutorial, job listing, or self-promotion."
         )},
         {"role": "user", "content": f"Post: {post_text[:200]}"}
     ], max_tokens=10, temperature=0.1)
