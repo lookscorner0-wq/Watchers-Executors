@@ -816,11 +816,31 @@ async def process_notifications(page):
         notifications = await page.evaluate("""
             () => {
                 const results = [];
-                const items = document.querySelectorAll(
-                    '.nt-card, .notification-card, '
-                    '[data-urn*="notification"], '
-                    '.artdeco-list__item'
-                );
+                notifications = await page.evaluate("""
+                    () => {
+                        const results = [];
+                        const items = document.querySelectorAll('.nt-card, .notification-card, [data-urn*="notification"], .artdeco-list__item');
+
+                        for (const item of items) {
+                            const text = item.innerText || '';
+                            if (!text.toLowerCase().includes('replied') &&
+                                !text.toLowerCase().includes('comment')) {
+                                continue;
+                            }
+                            const link = item.querySelector('a[href*="activity"], a[href*="ugcPost"]');
+                            const postUrl = link ? link.href.split('?')[0] : '';
+                            const nameEl = item.querySelector('.nt-card__headline, .notification-card__headline, span[aria-hidden="true"]');
+                            const authorName = nameEl ? nameEl.innerText.trim().split(' ')[0] : '';
+                            const profileLink = item.querySelector('a[href*="/in/"]');
+                            const profileUrl = profileLink ? profileLink.href.split('?')[0] : '';
+                            const isUnread = item.classList.contains('unread') || !!item.querySelector('.notification-badge, .unread-indicator');
+                            if (postUrl && profileUrl) {
+                                results.push({ postUrl, profileUrl, authorName, isUnread, notifText: text.substring(0, 100) });
+                            }
+                        }
+                        return results;
+                     }
+                """)
 
                 for (const item of items) {
                     const text = item.innerText || '';
