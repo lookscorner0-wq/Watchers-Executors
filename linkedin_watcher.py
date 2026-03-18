@@ -243,7 +243,7 @@ async def safe_goto(page, url):
 async def comment_on_post(page, card, comment_text):
     try:
         await card.scroll_into_view_if_needed()
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         comment_btn = await card.query_selector(
             'button[aria-label*="comment"], button:has-text("Comment")'
@@ -252,18 +252,18 @@ async def comment_on_post(page, card, comment_text):
             print(f"  Comment button not found")
             return False
 
-        await comment_btn.click()
-        await asyncio.sleep(2)
+        # FIXED: use JS click instead of native click (bypasses disabled state)
+        await page.evaluate("el => el.click()", comment_btn)
+        await asyncio.sleep(3)
 
         comment_box = await page.query_selector(
-            'div.ql-editor, div[contenteditable="true"]'
+            'div.ql-editor[contenteditable="true"], div[contenteditable="true"]'
         )
         if not comment_box:
             print(f"  Comment box not found")
             return False
 
-        # JS click — bypass interception
-        await page.evaluate("el => el.click()", comment_box)
+        await page.evaluate("el => { el.click(); el.focus(); }", comment_box)
         await asyncio.sleep(1)
         await human_type(comment_box, comment_text)
         await asyncio.sleep(2)
@@ -276,7 +276,8 @@ async def comment_on_post(page, card, comment_text):
         else:
             await page.evaluate("el => el.click()", submit_btn)
 
-        await asyncio.sleep(2)
+        # FIXED: wait longer then grab comment ID
+        await asyncio.sleep(4)
         print(f"  Comment posted!")
         return True
 
@@ -502,17 +503,21 @@ async def run_watcher():
                         print(f"  → Comment: {comment_text[:80]}...")
                         success  = await comment_on_post(page, card, comment_text)
                         message  = comment_text
-                        msg_type = "comment"
-
-                        comment_id = await page.evaluate("""
-                            () => {
-                                const items = document.querySelectorAll('.comments-comment-item');
-                                for (const c of items) {
-                                    if (c.getAttribute('data-id')) return c.getAttribute('data-id');
+                        msg_type = "comment
+                        
+                        comment_id = None
+                        if success:
+                            await asyncio.sleep(2)
+                            comment_id = await page.evaluate("""
+                                () => {
+                                    const items = document.querySelectorAll('.comments-comment-item');
+                                    for (const c of items) {
+                                        const id = c.getAttribute('data-id');
+                                        if (id) return id;
+                                    }
+                                    return null;
                                 }
-                                return null;
-                            }
-                        """)
+                            """)
                         print(f"  Comment ID: {comment_id}")
                     
                     if success:
