@@ -895,22 +895,23 @@ async def process_notifications(page):
 
                 # ── Now get their reply text from the post
                 profile_slug = profile_url.split("/in/")[-1].rstrip("/")
-                their_reply = await page.evaluate(f"""
-                    () => {{
-                        const items = document.querySelectorAll('.comments-comment-item');
-                        for (const item of items) {{
-                            const profileLink = item.querySelector('a[href*="/in/"]');
-                            if (profileLink && profileLink.href.includes('{profile_slug}')) {{               
-                                const textEl = item.querySelector(
+                their_reply = await page.evaluate(
+                      """(slug) => {
+                          const items = document.querySelectorAll('.comments-comment-item');
+                          for (const item of items) {
+                              const profileLink = item.querySelector('a[href*="/in/"]');
+                              if (profileLink && profileLink.href.includes(slug)) {
+                                 const textEl = item.querySelector(
                                     '.comments-comment__main-content, '
                                     '.comments-comment-item__main-content'
-                                );
-                                return textEl ? textEl.innerText.trim() : '';
-                            }}
-                        }}
-                        return '';
-                    }}
-                """)
+                                 );
+                                 return textEl ? textEl.innerText.trim() : '';
+                              }
+                          }
+                          return '';
+                      }""",
+                      profile_slug
+                )
 
                 if not their_reply:
                     print(f"  Could not find their reply text — skip")
