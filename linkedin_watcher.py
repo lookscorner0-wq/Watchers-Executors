@@ -503,8 +503,8 @@ async def run_watcher():
                         print(f"  → Comment: {comment_text[:80]}...")
                         success  = await comment_on_post(page, card, comment_text)
                         message  = comment_text
-                        msg_type = "comment
-                        
+                        msg_type = "comment"
+                                            
                         comment_id = None
                         if success:
                             await asyncio.sleep(2)
