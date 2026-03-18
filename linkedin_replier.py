@@ -434,19 +434,20 @@ async def read_post_context(page, post_url, comment_id=None):
         # Method 1: by comment_id (data-id) — most accurate
         our_comment = ""
         if comment_id:
-            our_comment = await page.evaluate(f"""
-                () => {{
-                    const el = document.querySelector('[data-id="{comment_id}"]');
-                    if (el) {{
+            our_comment = await page.evaluate(
+                """(cid) => {
+                    const el = document.querySelector('[data-id="' + cid + '"]');
+                    if (el) {
                         const textEl = el.querySelector(
                             '.comments-comment__main-content, '
                             '.comments-comment-item__main-content'
                         );
                         return textEl ? textEl.innerText.trim() : '';
-                    }}
+                    }
                     return '';
-                }}
-            """)
+                }""",
+                comment_id or ""
+            )
 
         # Method 2: fallback — search by "Bilal" or "NoError"
         if not our_comment:
