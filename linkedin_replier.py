@@ -682,7 +682,7 @@ async def process_inbox(page):
         print(f"  Inbox error: {e}")
 
 # ============================================================
-# PROCESS NOTIFICATIONS
+# PROCESS NOTIFICATIONS  ← FIXED SECTION
 # ============================================================
 async def process_notifications(page):
     print("\n--- Checking Notifications ---")
@@ -691,25 +691,28 @@ async def process_notifications(page):
         await asyncio.sleep(random.uniform(5, 7))
         await dismiss_cookie_banner(page)
 
+        # ← FIXED: removed broken selectors, added try-catch per item, sanitized text
         notifications = await page.evaluate("""
             () => {
                 const results = [];
-                const items = document.querySelectorAll('.nt-card, .notification-card, [data-urn*="notification"], .artdeco-list__item');
+                const items = document.querySelectorAll('.nt-card, .notification-card, .artdeco-list__item');
                 for (const item of items) {
-                    const text = item.innerText || '';
-                    if (!text.toLowerCase().includes('replied') && !text.toLowerCase().includes('comment')) {
-                        continue;
-                    }
-                    const link = item.querySelector('a[href*="activity"], a[href*="ugcPost"]');
-                    const postUrl = link ? link.href.split('?')[0] : '';
-                    const nameEl = item.querySelector('.nt-card__headline, .notification-card__headline, span[aria-hidden="true"]');
-                    const authorName = nameEl ? nameEl.innerText.trim().split(' ')[0] : '';
-                    const profileLink = item.querySelector('a[href*="/in/"]');
-                    const profileUrl = profileLink ? profileLink.href.split('?')[0] : '';
-                    const isUnread = item.classList.contains('unread') || !!item.querySelector('.notification-badge, .unread-indicator');
-                    if (postUrl && profileUrl) {
-                        results.push({ postUrl, profileUrl, authorName, isUnread, notifText: text.substring(0, 100) });
-                    }
+                    try {
+                        const text = (item.innerText || '').replace(/`/g, "'");
+                        if (!text.toLowerCase().includes('replied') && !text.toLowerCase().includes('comment')) {
+                            continue;
+                        }
+                        const link = item.querySelector('a[href*="activity"], a[href*="ugcPost"]');
+                        const postUrl = link ? link.href.split('?')[0] : '';
+                        const nameEl = item.querySelector('.nt-card__headline, .notification-card__headline');
+                        const authorName = nameEl ? nameEl.innerText.trim().split(' ')[0] : '';
+                        const profileLink = item.querySelector('a[href*="/in/"]');
+                        const profileUrl = profileLink ? profileLink.href.split('?')[0] : '';
+                        const isUnread = item.classList.contains('unread') || !!item.querySelector('.notification-badge');
+                        if (postUrl && profileUrl) {
+                            results.push({ postUrl, profileUrl, authorName, isUnread, notifText: text.substring(0, 100) });
+                        }
+                    } catch(e) {}
                 }
                 return results;
             }
