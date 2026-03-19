@@ -252,21 +252,23 @@ async def comment_on_post(page, card, comment_text):
             print(f"  Comment button not found")
             return False
 
-        # FIXED: use JS click instead of native click (bypasses disabled state)
         await page.evaluate("el => el.click()", comment_btn)
         await asyncio.sleep(3)
+        await page.screenshot(path="debug_after_comment_click.png")  # ADD
 
         comment_box = await page.query_selector(
             'div.ql-editor[contenteditable="true"], div[contenteditable="true"]'
         )
         if not comment_box:
             print(f"  Comment box not found")
+            await page.screenshot(path="debug_no_comment_box.png")  # ADD
             return False
 
         await page.evaluate("el => { el.click(); el.focus(); }", comment_box)
         await asyncio.sleep(1)
         await human_type(comment_box, comment_text)
         await asyncio.sleep(2)
+        await page.screenshot(path="debug_after_typing.png")  # ADD
 
         submit_btn = await page.query_selector(
             'button.comments-comment-box__submit-button'
@@ -276,8 +278,8 @@ async def comment_on_post(page, card, comment_text):
         else:
             await page.evaluate("el => el.click()", submit_btn)
 
-        # FIXED: wait longer then grab comment ID
         await asyncio.sleep(4)
+        await page.screenshot(path="debug_after_submit.png")  # ADD
         print(f"  Comment posted!")
         return True
 
