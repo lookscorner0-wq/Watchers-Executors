@@ -231,10 +231,17 @@ async def safe_goto(page, url):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(3)
+            
+            # Check if redirected to login/challenge
+            current = page.url
+            if "linkedin.com/login" in current or "checkpoint" in current or "challenge" in current:
+                print(f"  Session challenge detected!")
+                return False
+                
             return True
         except Exception as e:
             print(f"  Goto attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
     return False
 
 # ============================================================
