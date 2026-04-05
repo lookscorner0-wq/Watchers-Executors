@@ -1,576 +1,454 @@
-# ============================================================
-# linkedin_watcher.py — FINAL VERSION
-# ============================================================
-
 import os
-import asyncio
-import random
-import requests
-from playwright.async_api import async_playwright
-
-LI_AT         = os.environ.get("LI_AT", "")
-LI_JSESSIONID = os.environ.get("LI_JSESSIONID", "")
-OPENAI_KEY    = os.environ.get("OPENAI_KEY", "")
-SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY  = os.environ.get("SUPABASE_KEY", "")
-
-MAX_ACTIONS_PER_RUN = 5
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118.0.0.0 Safari/537.36",
-]
-
-SYSTEM_PROMPT = """
-You are Bilal Dev, sales manager for NoErrors — an AI Automation Agency.
-Your role is to find potential clients on LinkedIn who need our services and convert them through smart, human, non-salesy conversation.
-
-SERVICES WE OFFER:
-1. Lead Generation (AI-powered outreach, LinkedIn automation, email campaigns, B2B database scraping)
-2. Social Media Content Marketing (AI content calendar, auto-posting, LinkedIn/Instagram/Facebook/TikTok)
-3. AI Chatbots and Agents (customer support bots, appointment bots, WhatsApp bots, website chatbots)
-4. Custom Workflows (N8N, Make, Zapier, Pabbly automation setup and management)
-
-CLIENT TYPES:
-- Main Client: Small business, solo founder, startup — casual friendly tone, curiosity hooks, humor allowed, emojis allowed
-- GoodClient: Growing company, SaaS, agency, mid-size — professional but warm, mirror their technical language, free audit offer works well
-- Opportunity: Enterprise, Fortune, multinational, large corporation — zero emojis, formal tone, lead with credibility and case study, push for discovery call always
-
-HARD RULES:
-1. NEVER share price in first or second message
-2. NEVER sound salesy — always sound helpful and specific
-3. NEVER use markdown, bold, bullets, or formatting — plain text only
-4. NEVER reveal you are an AI
-5. NEVER mention services client did not ask for in first message
-6. NEVER send more than 180 characters in first outreach
-7. NEVER use emojis with Opportunity clients
-
-WHAT WORKS:
-1. Mirror exact technical language from their post
-2. Frame hook around what client is LOSING not what we offer
-3. Include specific result number when possible
-4. For Main Client — curiosity question hook, casual tone
-5. For GoodClient — lead with free audit offer
-6. For Opportunity — open with enterprise reference and specific result
-7. Never start with Hi I am Bilal — start with their pain point
-
-OUTPUT FORMAT FOR COMMENTS:
-- Plain text only
-- Maximum 180 characters
-- No hashtags
-- End with soft question
-
-OUTPUT FORMAT FOR DMs:
-- Plain text only
-- Maximum 2 sentences
-- Start with their pain point
-"""
+import json
+import time
+import logging
+import psycopg2
+from openai import OpenAI
 
 # ============================================================
-# KEYWORD GENERATOR
+# CONFIG
 # ============================================================
-def generate_keywords():
-    KEYWORDS_POOL = [
-        "need AI automation",
-        "need lead generation",
-        "need chatbot developer",
-        "looking for workflow automation",
-        "need leads funnel expert",
-        "hiring ai agent developer",
-        "need social media automation",
-        "need social media manager",
-        "need CRM automation",
-        "need customer support bot",
-        "need ai integration",
-    ]
-    keywords = random.sample(KEYWORDS_POOL, 4)
-    print(f"Keywords this run: {keywords}")
-    return keywords
+
+OPENAI_MODEL = "ft:gpt-4o-mini-2024-07-18:personal:final-brain-1:DREfTesR"
+
+SYSTEM_PROMPT = (
+    "You are the Analyzer Agent for the agency (the agency contact number). "
+    "You receive project briefs from Manager. Your job: analyze the brief, "
+    "check website if provided, identify missing info, build a complete project summary, "
+    "and hand back to Manager for verification. For workflow projects, identify modules "
+    "and what will be needed. If anything is unclear, ask Manager. Never contact client "
+    "directly. Self-log only for: recurring issues (2+ times), blockers, improvement "
+    "suggestions. Not for normal operations. "
+    "Services we offer: AI agents, automation, chatbots, workflows, lead gen, social media/content."
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [Analyzer] %(message)s"
+)
+log = logging.getLogger(__name__)
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+
 # ============================================================
-# 24 HOUR FILTER
+# DATABASE
 # ============================================================
-def is_post_recent(time_text):
-    if not time_text:
-        return False
-    t = time_text.lower().strip()
-    # Minutes = always recent
-    if 'm' in t and 'h' not in t and 'd' not in t:
-        return True
-    # Hours — max 23
-    if 'h' in t:
+
+def get_db():
+    return psycopg2.connect(os.environ["DATABASE_URL"])
+
+
+def fetch_pending_messages():
+    """Fetch all unprocessed messages addressed to analyzer."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, from_agent, message_type, payload, related_id
+        FROM agent_messages
+        WHERE to_agent  = 'analyzer'
+          AND processed = FALSE
+        ORDER BY created_at ASC
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    db.close()
+    return rows
+
+
+def mark_processed(message_id: int):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE agent_messages SET processed = TRUE, processed_at = NOW() WHERE id = %s",
+        (message_id,)
+    )
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def get_conversation_history(related_id: str):
+    """Load existing conversation turns for multi-turn briefs (e.g. missing info → update)."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "SELECT messages FROM analyzer_conversations WHERE related_id = %s",
+        (related_id,)
+    )
+    row = cur.fetchone()
+    cur.close()
+    db.close()
+    return json.loads(row[0]) if row else []
+
+
+def save_conversation_history(related_id: str, messages: list):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO analyzer_conversations (related_id, messages, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (related_id) DO UPDATE
+            SET messages   = EXCLUDED.messages,
+                updated_at = NOW()
+    """, (related_id, json.dumps(messages)))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def save_project(project_id: str, brief_raw: str, status: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO projects
+            (project_id, brief_raw, status, created_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (project_id) DO UPDATE
+            SET status     = EXCLUDED.status,
+                updated_at = NOW()
+    """, (project_id, brief_raw[:2000], status))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def save_project_summary(project_id: str, summary_text: str, executor: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO project_summaries
+            (project_id, summary_text, executor, created_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (project_id) DO UPDATE
+            SET summary_text = EXCLUDED.summary_text,
+                executor     = EXCLUDED.executor,
+                updated_at   = NOW()
+    """, (project_id, summary_text, executor))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def save_missing_info(project_id: str, questions_text: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO missing_info_requests
+            (project_id, questions, status, created_at)
+        VALUES (%s, %s, 'pending', NOW())
+        ON CONFLICT (project_id) DO UPDATE
+            SET questions  = EXCLUDED.questions,
+                status     = 'pending',
+                updated_at = NOW()
+    """, (project_id, questions_text))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def save_oos_result(check_id: str, signal: str, reason: str,
+                    executor: str = None, estimated_time: str = None):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO oos_checks
+            (check_id, signal, reason, executor, estimated_time, checked_at)
+        VALUES (%s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (check_id) DO NOTHING
+    """, (check_id, signal, reason, executor, estimated_time))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def save_self_log(category: str, description: str, suggestion: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO analyzer_self_logs
+            (category, description, suggestion, logged_at)
+        VALUES (%s, %s, %s, NOW())
+    """, (category, description, suggestion))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def notify_manager(message_type: str, payload: dict, related_id: str):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO agent_messages
+            (from_agent, to_agent, message_type, payload,
+             related_id, related_type, processed, created_at)
+        VALUES ('analyzer', 'manager', %s, %s, %s, 'project', FALSE, NOW())
+    """, (message_type, json.dumps(payload), related_id))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+def notify_watcher(check_id: str, signal: str, reason: str,
+                   executor: str = None, estimated_time: str = None):
+    payload = {
+        "check_id":       check_id,
+        "signal":         signal,
+        "reason":         reason,
+        "executor":       executor,
+        "estimated_time": estimated_time,
+    }
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO agent_messages
+            (from_agent, to_agent, message_type, payload,
+             related_id, related_type, processed, created_at)
+        VALUES ('analyzer', 'watcher', 'oos_signal', %s, %s, 'oos_check', FALSE, NOW())
+    """, (json.dumps(payload), check_id))
+    db.commit()
+    cur.close()
+    db.close()
+
+
+# ============================================================
+# OPENAI — CALL FINE-TUNED MODEL
+# ============================================================
+
+def call_analyzer(messages: list) -> str:
+    """Send full conversation history to fine-tuned model, return response text."""
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=1500,
+    )
+    return response.choices[0].message.content.strip()
+
+
+# ============================================================
+# RESPONSE PARSER
+# ============================================================
+
+def parse_response(response_text: str) -> dict:
+    """
+    Extract structured fields from model response.
+    Model always ends with STATUS / EXECUTOR / STORE / NEXT lines.
+    """
+    result = {
+        "status":     None,
+        "executor":   None,
+        "project_id": None,
+        "check_id":   None,
+        "signal":     None,
+        "raw":        response_text,
+    }
+
+    for line in response_text.splitlines():
+        line = line.strip()
+
+        if line.startswith("STATUS:"):
+            result["status"] = line.replace("STATUS:", "").strip().lower()
+
+        elif line.startswith("EXECUTOR:"):
+            result["executor"] = line.replace("EXECUTOR:", "").strip().lower()
+
+        elif line.startswith("STORE:"):
+            store_part = line.replace("STORE:", "").strip()
+            for segment in store_part.split(","):
+                segment = segment.strip()
+                if "=" in segment:
+                    key, _, val = segment.partition("=")
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key == "project_id":
+                        result["project_id"] = val
+                    elif key == "check_id":
+                        result["check_id"] = val
+                    elif key == "signal":
+                        result["signal"] = val.upper()
+                    elif key == "estimated_time":
+                        result["estimated_time"] = val
+
+    return result
+
+
+# ============================================================
+# ROUTING — act on model response
+# ============================================================
+
+def route_result(parsed: dict, brief_text: str, related_id: str):
+    status     = parsed.get("status") or ""
+    project_id = parsed.get("project_id") or related_id
+    executor   = parsed.get("executor") or "unknown"
+    summary    = parsed["raw"]
+
+    # ── Summary ready ─────────────────────────────────────────
+    if "summary_ready" in status:
+        save_project(project_id, brief_text, "summary_ready")
+        save_project_summary(project_id, summary, executor)
+        notify_manager(
+            message_type="summary_ready",
+            payload={"project_id": project_id, "executor": executor, "summary": summary},
+            related_id=project_id,
+        )
+        log.info(f"Summary ready — project_id={project_id} executor={executor}")
+
+    # ── Missing info ──────────────────────────────────────────
+    elif "missing_info" in status:
+        save_project(project_id, brief_text, "missing_info")
+        save_missing_info(project_id, summary)
+        notify_manager(
+            message_type="missing_info",
+            payload={"project_id": project_id, "questions": summary},
+            related_id=project_id,
+        )
+        log.info(f"Missing info flagged — project_id={project_id}")
+
+    # ── Budget flag ───────────────────────────────────────────
+    elif "budget_flag" in status:
+        save_project(project_id, brief_text, "budget_flag")
+        notify_manager(
+            message_type="budget_flag",
+            payload={"project_id": project_id, "details": summary},
+            related_id=project_id,
+        )
+        log.info(f"Budget flag — project_id={project_id}")
+
+    # ── Website error ─────────────────────────────────────────
+    elif "website_error" in status:
+        save_project(project_id, brief_text, "website_error")
+        notify_manager(
+            message_type="website_error",
+            payload={"project_id": project_id, "details": summary},
+            related_id=project_id,
+        )
+        log.info(f"Website error flagged — project_id={project_id}")
+
+    # ── Queued (executor busy) ────────────────────────────────
+    elif "queued" in status:
+        save_project(project_id, brief_text, "queued")
+        notify_manager(
+            message_type="project_queued",
+            payload={"project_id": project_id, "executor": executor, "details": summary},
+            related_id=project_id,
+        )
+        log.info(f"Project queued — project_id={project_id}")
+
+    # ── OOS check result ──────────────────────────────────────
+    elif any(x in status for x in ("oos", "signal", "green", "red")):
+        check_id       = parsed.get("check_id") or related_id
+        signal         = parsed.get("signal") or ("GREEN" if "green" in status else "RED")
+        estimated_time = parsed.get("estimated_time")
+
+        save_oos_result(check_id, signal, summary, executor, estimated_time)
+        notify_watcher(check_id, signal, summary, executor, estimated_time)
+        log.info(f"OOS check done — check_id={check_id} signal={signal}")
+
+    # ── Self-log / job review ─────────────────────────────────
+    elif any(x in status for x in ("self_log", "report", "review")):
+        save_self_log(category="job_review", description=summary, suggestion="")
+        notify_manager(
+            message_type="self_log_report",
+            payload={"report": summary},
+            related_id=related_id,
+        )
+        log.info("Self-log report saved and sent to Manager")
+
+    # ── Fallback — save raw and notify ───────────────────────
+    else:
+        log.warning(f"Unknown status '{status}' — forwarding raw to Manager")
+        notify_manager(
+            message_type="analyzer_response",
+            payload={"details": summary, "raw_status": status},
+            related_id=related_id,
+        )
+
+
+# ============================================================
+# PROCESS ONE MESSAGE
+# ============================================================
+
+def process_message(msg_id: int, from_agent: str, message_type: str,
+                    payload: dict, related_id: str):
+
+    log.info(f"Processing id={msg_id} type={message_type} related={related_id}")
+
+    # Build user turn text from payload
+    brief_text = (
+        payload.get("brief")
+        or payload.get("message")
+        or payload.get("update")
+        or json.dumps(payload)
+    )
+
+    # Load existing conversation (multi-turn support)
+    history = get_conversation_history(related_id)
+
+    if not history:
+        # First turn — inject system prompt
+        history = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Add new user message
+    history.append({"role": "user", "content": brief_text})
+
+    # Call fine-tuned model
+    response_text = call_analyzer(history)
+    log.info(f"Response received ({len(response_text)} chars)")
+
+    # Save updated history for next turn
+    history.append({"role": "assistant", "content": response_text})
+    save_conversation_history(related_id, history)
+
+    # Parse + route
+    parsed = parse_response(response_text)
+    route_result(parsed, brief_text, related_id)
+
+    # Mark done
+    mark_processed(msg_id)
+    log.info(f"id={msg_id} done — status={parsed.get('status')}")
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+def run():
+    log.info("Analyzer Agent starting")
+
+    while True:
         try:
-            return int(''.join(filter(str.isdigit, t))) <= 23
-        except:
-            return True
-    # Only 1d accepted
-    if '1d' in t:
-        return True
-    return False
+            messages = fetch_pending_messages()
 
-# ============================================================
-# SUPABASE
-# ============================================================
-def supabase_insert(table, data):
-    try:
-        res = requests.post(
-            f"{SUPABASE_URL}/rest/v1/{table}",
-            headers={
-                "apikey":        SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type":  "application/json",
-                "Prefer":        "return=minimal"
-            },
-            json=data, timeout=10
-        )
-        return res.status_code in [200, 201]
-    except Exception as e:
-        print(f"Supabase error: {e}")
-        return False
-
-def is_already_contacted(profile_url):
-    try:
-        res = requests.get(
-            f"{SUPABASE_URL}/rest/v1/conversations",
-            headers={
-                "apikey":        SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-            },
-            params={"profile_url": f"eq.{profile_url}", "select": "conv_id"},
-            timeout=10
-        )
-        return len(res.json()) > 0
-    except:
-        return False
-
-# ============================================================
-# OPENAI
-# ============================================================
-def call_openai(messages, max_tokens=150, temperature=0.5):
-    try:
-        res = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-            json={
-                "model":       "gpt-4o-mini",
-                "messages":    messages,
-                "max_tokens":  max_tokens,
-                "temperature": temperature
-            },
-            timeout=30
-        )
-        return res.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"OpenAI error: {e}")
-        return ""
-
-def get_client_type(text):
-    text = text.lower()
-    if any(x in text for x in ["enterprise","fortune","global","multinational","corporate"]):
-        return "Opportunity"
-    if any(x in text for x in ["startup","saas","growing","series a","scale up","agency"]):
-        return "GoodClient"
-    return "Main Client"
-
-def is_relevant(post_text):
-    result = call_openai([
-        {"role": "system", "content": (
-            "You are a lead qualifier for an AI Automation Agency. "
-            "Reply ONLY: relevant: yes OR relevant: no. "
-            "relevant: yes if the person mentions a business problem, "
-            "pain point, or need that AI automation, chatbots, lead generation, "
-            "or workflow tools could solve — even if they are not explicitly hiring. "
-            "relevant: no ONLY if it is purely a tip, tutorial, job listing, or self-promotion."
-        )},
-        {"role": "user", "content": f"Post: {post_text[:200]}"}
-    ], max_tokens=10, temperature=0.1)
-    return "relevant: yes" in result.lower()
-
-def generate_comment(post_text, client_type):
-    temp    = 0.7 if client_type == "Main Client" else 0.4
-    comment = call_openai([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": (
-            f"Write a LinkedIn comment. Client type: {client_type}.\n"
-            f"Post: {post_text[:200]}\n"
-            f"Max 180 chars. Plain text. End with question. No hashtags."
-        )}
-    ], max_tokens=80, temperature=temp)
-    comment = comment.replace("**","").replace("*","").replace("#","").replace("\n"," ")
-    return comment[:180]
-
-def generate_dm(post_text, client_type):
-    temp = 0.3 if client_type == "Opportunity" else 0.5
-    dm   = call_openai([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": (
-            f"Write a LinkedIn DM. Client type: {client_type}.\n"
-            f"Post: {post_text[:200]}\n"
-            f"Max 2 sentences. Plain text. Start with pain point."
-        )}
-    ], max_tokens=100, temperature=temp)
-    return dm.replace("**","").replace("*","").replace("#","").replace("\n"," ")
-
-# ============================================================
-# BROWSER
-# ============================================================
-def get_cookies():
-    return [
-        {"name": "li_at",      "value": LI_AT,                "domain": ".linkedin.com",     "path": "/"},
-        {"name": "JSESSIONID", "value": f'"{LI_JSESSIONID}"', "domain": ".www.linkedin.com", "path": "/"},
-        {"name": "liap",       "value": "true",               "domain": ".linkedin.com",     "path": "/"},
-        {"name": "lang",       "value": "v=2&lang=en-us",     "domain": ".linkedin.com",     "path": "/"},
-    ]
-
-async def human_type(element, text):
-    for char in text:
-        await element.type(char, delay=random.randint(50, 100))
-
-async def safe_goto(page, url):
-    for attempt in range(2):
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(3)
-            
-            # Check if redirected to login/challenge
-            current = page.url
-            if "linkedin.com/login" in current or "checkpoint" in current or "challenge" in current:
-                print(f"  Session challenge detected!")
-                return False
-                
-            return True
-        except Exception as e:
-            print(f"  Goto attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(5)
-    return False
-
-# ============================================================
-# COMMENT
-# ============================================================
-async def comment_on_post(page, card, comment_text):
-    try:
-        await card.scroll_into_view_if_needed()
-        await asyncio.sleep(2)
-
-        comment_btn = await card.query_selector(
-            'button[aria-label*="comment"], button:has-text("Comment")'
-        )
-        if not comment_btn:
-            print(f"  Comment button not found")
-            return False
-
-        await page.evaluate("el => el.click()", comment_btn)
-        await asyncio.sleep(3)
-        await page.screenshot(path="debug_after_comment_click.png")  # ADD
-
-        comment_box = await page.query_selector(
-            'div.ql-editor[contenteditable="true"], div[contenteditable="true"]'
-        )
-        if not comment_box:
-            print(f"  Comment box not found")
-            await page.screenshot(path="debug_no_comment_box.png")  # ADD
-            return False
-
-        await page.evaluate("el => { el.click(); el.focus(); }", comment_box)
-        await asyncio.sleep(1)
-        await human_type(comment_box, comment_text)
-        await asyncio.sleep(2)
-        await page.screenshot(path="debug_after_typing.png")  # ADD
-
-        submit_btn = await page.query_selector(
-            'button.comments-comment-box__submit-button'
-        )
-        if not submit_btn:
-            await comment_box.press("Control+Enter")
-        else:
-            await page.evaluate("el => el.click()", submit_btn)
-
-        await asyncio.sleep(4)
-        await page.screenshot(path="debug_after_submit.png")  # ADD
-        print(f"  Comment posted!")
-        return True
-
-    except Exception as e:
-        print(f"  Comment error: {e}")
-        return False
-
-# ============================================================
-# DM
-# ============================================================
-async def dm_company(page, profile_url, dm_text):
-    try:
-        ok = await safe_goto(page, profile_url)
-        if not ok:
-            return False
-
-        # Message button
-        msg_btn = await page.query_selector(
-            'button:has-text("Message"), a:has-text("Message")'
-        )
-        if not msg_btn:
-            dots = await page.query_selector('button[aria-label*="More"]')
-            if dots:
-                await page.evaluate("el => el.click()", dots)
-                await asyncio.sleep(1)
-                msg_btn = await page.query_selector(
-                    'li:has-text("Message"), div:has-text("Send message")'
-                )
-        if not msg_btn:
-            print(f"  Message button not found")
-            return False
-
-        await page.evaluate("el => el.click()", msg_btn)
-        await asyncio.sleep(2)
-
-        # Topic dropdown
-        for topic in ["Service Request", "Request a Demo", "General Inquiry"]:
-            try:
-                opt = await page.query_selector(
-                    f'option:has-text("{topic}"), li:has-text("{topic}")'
-                )
-                if opt:
-                    await page.evaluate("el => el.click()", opt)
-                    await asyncio.sleep(1)
-                    print(f"  Topic: {topic}")
-                    break
-            except:
+            if not messages:
+                log.info("No pending messages — sleeping 30s")
+                time.sleep(30)
                 continue
 
-        # Message box — try multiple selectors
-        msg_box = await page.query_selector('div[aria-label="Write a message…"]')
-        if not msg_box:
-            msg_box = await page.query_selector('div.msg-form__contenteditable')
-        if not msg_box:
-            msg_box = await page.query_selector('textarea')
-        if not msg_box:
-            print(f"  Message box not found")
-            return False
+            log.info(f"{len(messages)} message(s) found")
 
-        # JS click + focus
-        await page.evaluate("el => { el.click(); el.focus(); }", msg_box)
-        await asyncio.sleep(1)
-        await human_type(msg_box, dm_text)
-        await asyncio.sleep(2)
-
-        # Send button
-        send_btn = await page.query_selector(
-            'button.msg-form__send-button, '
-            'button[aria-label="Send"], '
-            'button:has-text("Send message")'
-        )
-        if not send_btn:
-            send_btn = await page.query_selector('button:has-text("Send")')
-
-        if send_btn:
-            await page.evaluate("el => el.click()", send_btn)
-            await asyncio.sleep(2)
-            print(f"  DM sent!")
-            return True
-
-        print(f"  Send button not found")
-        return False
-
-    except Exception as e:
-        print(f"  DM error: {e}")
-        return False
-
-# ============================================================
-# MAIN
-# ============================================================
-async def run_watcher():
-    print(f"\n{'='*50}")
-    print(f"LinkedIn Watcher Started")
-    print(f"{'='*50}\n")
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 1366, "height": 768}
-        )
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-        await context.add_cookies(get_cookies())
-        page = await context.new_page()
-
-        # Login check
-        ok = await safe_goto(page, "https://www.linkedin.com/feed/")
-        if not ok or "feed" not in page.url:
-            print("Session expired — refresh cookies!")
-            await browser.close()
-            return
-
-        print("Session valid!\n")
-        actions_done = 0
-        KEYWORDS = generate_keywords()
-        for keyword in KEYWORDS:
-
-            print(f"\nSearching: '{keyword}'")
-            search_url = (
-                f"https://www.linkedin.com/search/results/content/"
-                f"?keywords={keyword.replace(' ', '%20')}&sortBy=date_posted"
-            )
-
-            ok = await safe_goto(page, search_url)
-            if not ok:
-                print(f"  Search failed — skip")
-                continue
-
-            await asyncio.sleep(4)
-            for _ in range(2):
-                await page.evaluate("window.scrollBy(0, 600)")
-                await asyncio.sleep(1)
-
-            cards = await page.query_selector_all('.occludable-update')
-            print(f"  Found {len(cards)} posts")
-
-            i = 0
-            while i < len(cards):
-                if actions_done >= MAX_ACTIONS_PER_RUN:
-                    break
-
-                card = cards[i]
-                i   += 1
+            for row in messages:
+                msg_id, from_agent, message_type, payload_raw, related_id = row
 
                 try:
-                    # 24 hour filter
-                    time_el   = await card.query_selector(
-                        '.update-components-actor__sub-description '
-                        'span:not(.visually-hidden)'
+                    payload = (
+                        payload_raw
+                        if isinstance(payload_raw, dict)
+                        else json.loads(payload_raw)
                     )
-                    time_text = await time_el.inner_text() if time_el else ""
-                    time_text = time_text.strip().split('•')[0].strip()
-
-                    if not is_post_recent(time_text):
-                        print(f"  Old ({time_text}) — skip")
-                        continue
-
-                    # Post text
-                    text_el   = await card.query_selector('span.break-words')
-                    post_text = await text_el.inner_text() if text_el else ""
-                    if not post_text:
-                        continue
-
-                    # Profile URL
-                    links       = await card.query_selector_all('a')
-                    profile_url = ""
-                    is_company  = False
-                    for link in links:
-                        href = await link.get_attribute('href') or ''
-                        if '/in/' in href:
-                            profile_url = href.split('?')[0]
-                            break
-                        if '/company/' in href:
-                            profile_url = href.split('?')[0]
-                            is_company  = True
-                            break
-
-                    if not profile_url:
-                        continue
-
-                    # Duplicate check
-                    if is_already_contacted(profile_url):
-                        print(f"  Already contacted — skip")
-                        continue
-
-                    # GPT qualify
-                    if not is_relevant(post_text):
-                        print(f"  Not relevant — skip")
-                        continue
-
-                    client_type = get_client_type(post_text)
-                    author_el   = await card.query_selector(
-                        '.update-components-actor__title span:not(.visually-hidden)'
-                    )
-                    author_name = await author_el.inner_text() if author_el else "Unknown"
-                    author_name = author_name.strip().split('\n')[0]
-
-                    print(f"  {author_name} | {client_type} | "
-                          f"Company:{is_company} | {time_text}")
-
-                    post_url = page.url.split('?')[0]
-                    success  = False
-
-                    if is_company:
-                        dm_text  = generate_dm(post_text, client_type)
-                        print(f"  → DM: {dm_text[:80]}...")
-                        success  = await dm_company(page, profile_url, dm_text)
-                        message  = dm_text
-                        msg_type = "dm"
-
-                        # Reload search after DM
-                        await safe_goto(page, search_url)
-                        await asyncio.sleep(4)
-                        for _ in range(2):
-                            await page.evaluate("window.scrollBy(0, 600)")
-                            await asyncio.sleep(1)
-                        cards = await page.query_selector_all('.occludable-update')
-
-                    else:
-                        comment_text = generate_comment(post_text, client_type)
-                        print(f"  → Comment: {comment_text[:80]}...")
-                        success  = await comment_on_post(page, card, comment_text)
-                        message  = comment_text
-                        msg_type = "comment"
-                                            
-                        comment_id = None
-                        if success:
-                            await asyncio.sleep(2)
-                            comment_id = await page.evaluate("""
-                                () => {
-                                    const items = document.querySelectorAll('.comments-comment-item');
-                                    for (const c of items) {
-                                        const id = c.getAttribute('data-id');
-                                        if (id) return id;
-                                    }
-                                    return null;
-                                }
-                            """)
-                        print(f"  Comment ID: {comment_id}")
-                    
-                    if success:
-                        actions_done += 1
-
-                        supabase_insert("leads_queue", {
-                            "platform":                 "linkedin",
-                            "potential_client_name":    author_name,
-                            "potential_client_profile": profile_url,
-                            "post_content":             post_text[:500],
-                            "post_url":                 post_url,
-                            "assigned_to":              "linkedin_watcher",
-                            "status":                   "contacted"
-                        })
-                        supabase_insert("conversations", {
-                            "platform":    "linkedin",
-                            "profile_url": profile_url,
-                            "post_url":    post_url,
-                            "client_type": client_type,
-                            "message":     message,
-                            "sender":      "agent",
-                            "message_type": msg_type,
-                            "status":      "approval_sent"
-                        })
-                        supabase_insert("agent_logs", {
-                            "agent_name": "linkedin_watcher",
-                            "action":     f"{'DM' if is_company else 'Comment'} "
-                                         f"to {author_name}",
-                            "details":    profile_url,
-                            "status":     "success"
-                        })
-
-                        print(f"  Saved! {actions_done}/{MAX_ACTIONS_PER_RUN}\n")
-                        await asyncio.sleep(random.uniform(8, 12))
+                    process_message(msg_id, from_agent, message_type, payload, related_id)
 
                 except Exception as e:
-                    print(f"  Error: {e}")
+                    log.error(f"Error on id={msg_id}: {e}")
+                    mark_processed(msg_id)  # avoid infinite retry
                     continue
 
-            await asyncio.sleep(3)
+                time.sleep(2)
 
-        print(f"\n{'='*50}")
-        print(f"Done! Actions: {actions_done}")
-        print(f"{'='*50}")
-        await browser.close()
+        except Exception as e:
+            log.error(f"Loop error: {e}")
+            time.sleep(15)
 
-asyncio.run(run_watcher())
+
+if __name__ == "__main__":
+    run()
