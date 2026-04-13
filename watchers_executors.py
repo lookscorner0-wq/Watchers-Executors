@@ -51,8 +51,6 @@ OPENAI_MODEL    = os.environ.get("OPENAI_MODEL_ID",
 DATABASE_URL    = os.environ["DATABASE_URL"]
 DISCORD_TOKEN   = os.environ.get("DISCORD_TOKEN", "")
 DISCORD_API     = "https://discord.com/api/v10"
-BROWSERLESS_URL = os.environ.get("BROWSERLESS_URL", "http://localhost:3001")
-TOR_PROXY       = os.environ.get("TOR_PROXY_URL", "socks5://127.0.0.1:9050")
 GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO     = os.environ.get("GITHUB_REPO", "")
 
