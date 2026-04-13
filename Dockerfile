@@ -13,4 +13,4 @@ RUN playwright install --with-deps chromium
 COPY . .
 
 # Command to run
-CMD ["python", "watchers_executors(1).py"]
+CMD ["python", "watchers_executors.py"]
