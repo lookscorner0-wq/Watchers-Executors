@@ -1,0 +1,1859 @@
+
+68.98 KB •1,855 lines
+•
+Formatting may be inconsistent from source
+
+"""
+agency_core.py
+==============
+Agency    : NoError
+Agents    : Manager · Analyzer · Researcher
+Stack     : LangGraph (state/checkpoints/persistence)
+            OpenClaw / Baileys bridge (WhatsApp via Evolution REST)
+            OpenAI ft-model (all decision-making)
+            PostgreSQL (state, NOTIFY, messaging)
+"""
+
+from __future__ import annotations
+
+import csv
+import imaplib
+import io
+import json
+import logging
+import operator
+import os
+import random
+import select
+import signal
+import smtplib
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email import message_from_bytes
+from typing import Annotated, Optional, TypedDict
+
+import psycopg2
+import psycopg2.extensions
+import psycopg2.pool
+import requests
+import schedule
+import uvicorn
+from fastapi import FastAPI, Request
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph import END, StateGraph
+from openai import APIError, APITimeoutError, OpenAI, RateLimitError
+from psycopg_pool import ConnectionPool
+
+# ══════════════════════════════════════════════════════════
+# LOGGING
+# ══════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s — %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("noerror.core")
+
+# ══════════════════════════════════════════════════════════
+# CONFIG
+# ══════════════════════════════════════════════════════════
+
+AGENCY             = "NoError"
+MODEL              = os.environ.get(
+    "OPENAI_MODEL",
+    "ft:gpt-4o-mini-2024-07-18:personal:final-brain-1:DREfTesR",
+)
+DATABASE_URL       = os.environ.get("DATABASE_URL", "")
+EVO_URL            = os.environ.get("EVOLUTION_URL", "").rstrip("/")
+EVO_KEY            = os.environ.get("EVOLUTION_API_KEY", "")
+EVO_INSTANCE       = os.environ.get("EVOLUTION_INSTANCE", "whatsapp")
+CEO_WA             = os.environ.get("CEO_WHATSAPP_NUMBER", "")
+GMAIL_USER         = os.environ.get("GMAIL_USER", "")
+GMAIL_PASS         = os.environ.get("GMAIL_APP_PASSWORD", "")
+SHEET_URL          = os.environ.get("GOOGLE_SHEET_URL", "")
+OPENAI_KEY         = os.environ.get("OPENAI_API_KEY", "")
+
+# Tuning knobs
+HB_TIMEOUT_MIN         = 65    # Researcher silence → alert CEO
+MANAGER_POLL_SEC       = 60
+ANALYZER_POLL_SEC      = 15
+RESEARCHER_POLL_SEC    = 300
+RESEARCHER_HB_INTERVAL = 1800  # 30 min
+
+GMAIL_KEYWORDS = ["payment", "invoice", "urgent", "contract", "project", "client"]
+
+# ── System prompts ──────────────────────────────────────
+MANAGER_SYS = (
+    f"You are the Manager of {AGENCY}, an AI automation agency. "
+    "Handle CEO commands, client messages, and agent reports. "
+    "Be concise (2-3 lines max), professional, action-oriented."
+)
+ANALYZER_SYS = (
+    f"You are the Analyzer of {AGENCY}. "
+    "Evaluate posts/leads for business opportunity. "
+    "Be decisive and concise. Never hallucinate data."
+)
+RESEARCHER_SYS = (
+    f"You are the Researcher of {AGENCY}. "
+    "Synthesize web research into actionable business intelligence. "
+    "Highlight leads, opportunities, and trends."
+)
+
+# ══════════════════════════════════════════════════════════
+# OPENAI
+# ══════════════════════════════════════════════════════════
+
+_oai_client: OpenAI | None = None
+_oai_lock = threading.Lock()
+
+
+def _oai() -> OpenAI:
+    global _oai_client
+    if _oai_client is None:
+        with _oai_lock:
+            if _oai_client is None:
+                _oai_client = OpenAI(api_key=OPENAI_KEY)
+    return _oai_client
+
+
+def call_llm(
+    messages: list,
+    system: str = MANAGER_SYS,
+    max_tokens: int = 300,
+    temperature: float = 0.7,
+) -> str | None:
+    full = [{"role": "system", "content": system}] + messages
+    for attempt in range(3):
+        try:
+            r = _oai().chat.completions.create(
+                model=MODEL,
+                messages=full,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return r.choices[0].message.content.strip()
+        except (APITimeoutError, RateLimitError) as exc:
+            wait = (2 ** attempt) + random.uniform(0, 1)
+            log.warning(f"[LLM] retry {attempt + 1}/3 in {wait:.1f}s: {exc}")
+            time.sleep(wait)
+        except (APIError, Exception) as exc:
+            log.error(f"[LLM] error: {exc}")
+            return None
+    return None
+
+# ══════════════════════════════════════════════════════════
+# DB POOL  (psycopg2 — sync, shared across all agents)
+# ══════════════════════════════════════════════════════════
+
+_pg2_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_pg2_lock = threading.Lock()
+
+
+def _pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pg2_pool
+    if _pg2_pool is None:
+        with _pg2_lock:
+            if _pg2_pool is None:
+                _pg2_pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=4, maxconn=20, dsn=DATABASE_URL
+                )
+    return _pg2_pool
+
+
+def db_fetch(sql: str, params: tuple = ()) -> list:
+    conn = _pool().getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall() or []
+    except Exception as exc:
+        log.error(f"[DB] fetch: {exc}")
+        return []
+    finally:
+        _pool().putconn(conn)
+
+
+def db_exec(sql: str, params: tuple = ()) -> bool:
+    conn = _pool().getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        conn.commit()
+        return True
+    except Exception as exc:
+        conn.rollback()
+        log.error(f"[DB] exec: {exc}")
+        return False
+    finally:
+        _pool().putconn(conn)
+
+
+def db_notify(channel: str, payload: str = "") -> None:
+    conn = _pool().getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_notify(%s, %s)", (channel, payload))
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        log.error(f"[DB] notify: {exc}")
+    finally:
+        _pool().putconn(conn)
+
+# ══════════════════════════════════════════════════════════
+# SCHEMA  (idempotent)
+# ══════════════════════════════════════════════════════════
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS checkpoints (
+    thread_id            TEXT NOT NULL,
+    checkpoint_ns        TEXT NOT NULL DEFAULT '',
+    checkpoint_id        TEXT NOT NULL,
+    parent_checkpoint_id TEXT,
+    type                 TEXT,
+    checkpoint           JSONB,
+    metadata             JSONB,
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+);
+CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+    thread_id     TEXT NOT NULL,
+    checkpoint_ns TEXT NOT NULL DEFAULT '',
+    channel       TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    type          TEXT NOT NULL,
+    blob          BYTEA,
+    PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
+);
+CREATE TABLE IF NOT EXISTS checkpoint_migrations (v INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS checkpoint_writes (
+    thread_id     TEXT NOT NULL,
+    checkpoint_ns TEXT NOT NULL DEFAULT '',
+    checkpoint_id TEXT NOT NULL,
+    task_id       TEXT NOT NULL,
+    idx           SERIAL NOT NULL,
+    channel       TEXT NOT NULL,
+    type          TEXT,
+    blob          BYTEA NOT NULL,
+    task_path     TEXT,
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+);
+CREATE TABLE IF NOT EXISTS leads (
+    lead_id           TEXT PRIMARY KEY,
+    name              TEXT,
+    platform          TEXT,
+    status            TEXT DEFAULT 'new',
+    whatsapp          TEXT,
+    watcher_notes     TEXT,
+    manager_contacted BOOLEAN DEFAULT FALSE,
+    last_updated      TIMESTAMPTZ DEFAULT NOW(),
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS watcher_conversations (
+    lead_id  TEXT PRIMARY KEY,
+    messages JSONB DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS oos_temp (
+    lead_id      TEXT PRIMARY KEY,
+    platform     TEXT,
+    post_url     TEXT,
+    post_content TEXT,
+    username     TEXT,
+    source_type  TEXT,
+    status       TEXT DEFAULT 'pending_analyzer',
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id           SERIAL PRIMARY KEY,
+    from_agent   TEXT,
+    to_agent     TEXT,
+    message_type TEXT,
+    payload      JSONB,
+    related_id   TEXT,
+    related_type TEXT,
+    is_read      BOOLEAN DEFAULT FALSE,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS agent_errors (
+    id                 SERIAL PRIMARY KEY,
+    agent_name         TEXT,
+    error_type         TEXT,
+    error_message      TEXT,
+    self_heal_attempts INT DEFAULT 0,
+    status             TEXT DEFAULT 'open',
+    created_at         TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS projects (
+    project_id    TEXT PRIMARY KEY,
+    executor_type TEXT,
+    status        TEXT DEFAULT 'pending_ceo',
+    client        TEXT,
+    deploy_note   TEXT,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS whatsapp_conv_state (
+    jid                   TEXT PRIMARY KEY,
+    last_processed_msg_id TEXT,
+    last_updated          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS agent_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS system_flags (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS watcher_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS researcher_results (
+    id         SERIAL PRIMARY KEY,
+    platform   TEXT,
+    query      TEXT,
+    results    JSONB,
+    summary    TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE checkpoint_writes ADD COLUMN IF NOT EXISTS task_path TEXT;
+ALTER TABLE leads              ADD COLUMN IF NOT EXISTS manager_contacted BOOLEAN DEFAULT FALSE;
+"""
+
+
+def setup_schema() -> None:
+    log.info("[Core] Running schema migrations…")
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SCHEMA)
+        log.info("[Core] Schema ready ✓")
+    except Exception as exc:
+        log.error(f"[Core] Schema error: {exc}")
+        raise
+    finally:
+        conn.close()
+
+# ══════════════════════════════════════════════════════════
+# DB HELPERS — shared utilities
+# ══════════════════════════════════════════════════════════
+
+def setting_get(key: str, default: str = "") -> str:
+    rows = db_fetch("SELECT value FROM agent_settings WHERE key=%s", (key,))
+    return rows[0][0] if rows else default
+
+
+def setting_set(key: str, value: str) -> None:
+    db_exec(
+        """INSERT INTO agent_settings (key, value, updated_at) VALUES (%s, %s, NOW())
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""",
+        (key, value),
+    )
+
+
+def flag_get(key: str) -> bool:
+    rows = db_fetch("SELECT value FROM system_flags WHERE key=%s", (key,))
+    return bool(rows and rows[0][0].lower() == "true")
+
+
+def flag_set(key: str, value: bool = True) -> None:
+    db_exec(
+        """INSERT INTO system_flags (key, value, updated_at) VALUES (%s, %s, NOW())
+           ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""",
+        (key, "true" if value else "false"),
+    )
+
+
+def gmail_enabled() -> bool:
+    return setting_get("gmail_enabled", "false").lower() == "true"
+
+
+def log_error(agent: str, err_type: str, detail: str) -> None:
+    db_exec(
+        """INSERT INTO agent_errors (agent_name, error_type, error_message, status)
+           VALUES (%s, %s, %s, 'open')""",
+        (agent, err_type, detail[:2000]),
+    )
+
+
+# ── Agent messaging ──────────────────────────────────────
+
+def msg_send(
+    from_agent: str,
+    to_agent: str,
+    msg_type: str,
+    payload: dict,
+    related_id: str = "",
+    related_type: str = "system",
+) -> None:
+    db_exec(
+        """INSERT INTO agent_messages
+               (from_agent, to_agent, message_type, payload, related_id, related_type)
+           VALUES (%s,%s,%s,%s,%s,%s)""",
+        (from_agent, to_agent, msg_type,
+         json.dumps(payload), related_id, related_type),
+    )
+    db_notify("agent_channel", to_agent)
+
+
+def msg_pull(to_agent: str) -> list[dict]:
+    rows = db_fetch(
+        """SELECT id, from_agent, message_type, payload, related_id, related_type
+           FROM agent_messages
+           WHERE to_agent=%s AND is_read=false
+           ORDER BY created_at ASC
+           LIMIT 20""",
+        (to_agent,),
+    )
+    out = []
+    for r in rows:
+        out.append({
+            "id":           r[0],
+            "from_agent":   r[1],
+            "message_type": r[2],
+            "payload":      r[3] if isinstance(r[3], dict) else json.loads(r[3] or "{}"),
+            "related_id":   r[4],
+            "related_type": r[5],
+        })
+    return out
+
+
+def msg_mark_read(msg_id: int) -> None:
+    db_exec("UPDATE agent_messages SET is_read=true WHERE id=%s", (msg_id,))
+
+
+# ── WhatsApp dedup state ─────────────────────────────────
+
+def wa_get_last_id(jid: str) -> str | None:
+    rows = db_fetch(
+        "SELECT last_processed_msg_id FROM whatsapp_conv_state WHERE jid=%s", (jid,)
+    )
+    return rows[0][0] if rows else None
+
+
+def wa_set_last_id(jid: str, msg_id: str) -> None:
+    db_exec(
+        """INSERT INTO whatsapp_conv_state (jid, last_processed_msg_id, last_updated)
+           VALUES (%s,%s,NOW())
+           ON CONFLICT (jid) DO UPDATE
+               SET last_processed_msg_id=EXCLUDED.last_processed_msg_id,
+                   last_updated=NOW()""",
+        (jid, msg_id),
+    )
+
+# ══════════════════════════════════════════════════════════
+# WHATSAPP  (OpenClaw / Baileys → Evolution REST bridge)
+# ══════════════════════════════════════════════════════════
+
+def _evo_hdr() -> dict:
+    return {"Content-Type": "application/json", "apikey": EVO_KEY}
+
+
+def _jid(number: str) -> str:
+    clean = number.replace("+", "").replace("-", "").replace(" ", "")
+    return clean if clean.endswith("@s.whatsapp.net") else f"{clean}@s.whatsapp.net"
+
+
+def wa_send(number: str, text: str) -> bool:
+    jid = _jid(number)
+    try:
+        r = requests.post(
+            f"{EVO_URL}/message/sendText/{EVO_INSTANCE}",
+            json={"number": jid, "text": text},
+            headers=_evo_hdr(),
+            timeout=30,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as exc:
+        log.error(f"[WA] send error → {number}: {exc}")
+        return False
+
+
+def wa_connected() -> bool:
+    try:
+        r = requests.get(
+            f"{EVO_URL}/instance/connectionState/{EVO_INSTANCE}",
+            headers=_evo_hdr(), timeout=8,
+        )
+        d = r.json()
+        state = d.get("instance", {}).get("state") or d.get("state", "")
+        return state == "open"
+    except Exception:
+        return False
+
+
+def wa_fetch_new(jid: str, limit: int = 30) -> list[dict]:
+    """
+    Fetch recent messages for JID.
+    Returns only incoming messages after last processed ID.
+    """
+    try:
+        r = requests.post(
+            f"{EVO_URL}/chat/findMessages/{EVO_INSTANCE}",
+            json={"where": {"key": {"remoteJid": jid}}, "limit": limit},
+            headers=_evo_hdr(), timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        records = (
+            data if isinstance(data, list)
+            else data.get("messages", {}).get("records", [])
+        )
+    except Exception as exc:
+        log.error(f"[WA] fetch error for {jid}: {exc}")
+        return []
+
+    all_msgs: list[dict] = []
+    for m in records:
+        mc = m.get("message", {})
+        text = (
+            mc.get("conversation")
+            or mc.get("extendedTextMessage", {}).get("text", "")
+        )
+        all_msgs.append({
+            "id":     m.get("key", {}).get("id", ""),
+            "jid":    jid,
+            "body":   text,
+            "fromMe": m.get("key", {}).get("fromMe", False),
+            "ts":     m.get("messageTimestamp", 0),
+        })
+    all_msgs.sort(key=lambda x: x["ts"])
+
+    last_id = wa_get_last_id(jid)
+    if last_id is None:
+        incoming = [m for m in all_msgs if not m["fromMe"] and m["body"]]
+        return incoming[-1:] if incoming else []
+
+    found, new_msgs = False, []
+    for m in all_msgs:
+        if found and not m["fromMe"] and m["body"]:
+            new_msgs.append(m)
+        if m["id"] == last_id:
+            found = True
+
+    if not found:
+        incoming = [m for m in all_msgs if not m["fromMe"] and m["body"]]
+        return incoming[-1:] if incoming else []
+
+    return new_msgs
+
+
+def wa_active_jids(limit: int = 50) -> list[str]:
+    try:
+        r = requests.post(
+            f"{EVO_URL}/chat/findMessages/{EVO_INSTANCE}",
+            json={"limit": limit}, headers=_evo_hdr(), timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        records = (
+            data if isinstance(data, list)
+            else data.get("messages", {}).get("records", [])
+        )
+        jids = {
+            m.get("key", {}).get("remoteJid", "")
+            for m in records
+            if not m.get("key", {}).get("fromMe", True)
+        }
+        return [j for j in jids if j]
+    except Exception as exc:
+        log.error(f"[WA] active_jids error: {exc}")
+        return []
+
+# ══════════════════════════════════════════════════════════
+# GMAIL
+# ══════════════════════════════════════════════════════════
+
+def gmail_unread(limit: int = 10) -> list[dict]:
+    results: list[dict] = []
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(GMAIL_USER, GMAIL_PASS)
+        mail.select("inbox")
+        _, data = mail.search(None, "UNSEEN")
+        ids = data[0].split()[-limit:]
+        for eid in ids:
+            _, msg_data = mail.fetch(eid, "(RFC822)")
+            msg = message_from_bytes(msg_data[0][1])
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        break
+            else:
+                body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            results.append({
+                "id":      eid.decode(),
+                "subject": msg.get("Subject", ""),
+                "sender":  msg.get("From", ""),
+                "body":    body[:2000],
+            })
+        mail.logout()
+    except Exception as exc:
+        log.error(f"[Gmail] IMAP error: {exc}")
+    return results
+
+
+def gmail_send(to: str, subject: str, body: str) -> bool:
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = to
+        msg.attach(MIMEText(body, "plain"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(GMAIL_USER, GMAIL_PASS)
+            s.sendmail(GMAIL_USER, to, msg.as_string())
+        return True
+    except Exception as exc:
+        log.error(f"[Gmail] SMTP error: {exc}")
+        return False
+
+
+def _email_important(em: dict) -> bool:
+    return any(kw in em.get("subject", "").lower() for kw in GMAIL_KEYWORDS)
+
+
+# ══════════════════════════════════════════════════════════
+# GOOGLE SHEET
+# ══════════════════════════════════════════════════════════
+
+def sheet_overdue() -> list[dict]:
+    try:
+        sheet_id = SHEET_URL.split("/d/")[1].split("/")[0]
+        url      = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        resp     = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        rows = [
+            {k.strip().lower().replace(" ", "_"): v.strip() for k, v in row.items()}
+            for row in reader
+        ]
+        return [
+            r for r in rows
+            if r.get("status", "").lower() in ("overdue", "pending", "unpaid")
+        ]
+    except Exception as exc:
+        log.error(f"[Sheet] error: {exc}")
+        return []
+
+# ══════════════════════════════════════════════════════════
+# LANGGRAPH CHECKPOINTER  (psycopg3 pool, shared)
+# ══════════════════════════════════════════════════════════
+
+_cp_pool: ConnectionPool | None = None
+_cp_lock = threading.Lock()
+
+
+def _checkpointer() -> PostgresSaver:
+    global _cp_pool
+    if _cp_pool is None:
+        with _cp_lock:
+            if _cp_pool is None:
+                _cp_pool = ConnectionPool(DATABASE_URL, max_size=6, open=False)
+                _cp_pool.open(wait=True)
+    saver = PostgresSaver(_cp_pool)
+    try:
+        saver.setup()
+    except Exception:
+        pass  # tables already exist
+    return saver
+
+# ══════════════════════════════════════════════════════════
+# ── MANAGER AGENT ────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+
+class ManagerState(TypedDict):
+    event_type:    str
+    event_payload: dict
+    actions:       Annotated[list[str], operator.add]
+    errors:        Annotated[list[str], operator.add]
+
+
+# ── Manager: listen (priority router) ───────────────────
+
+def _mgr_listen(state: ManagerState) -> ManagerState:
+    # 1. Agent messages
+    msgs = msg_pull("manager")
+    if msgs:
+        m = msgs[0]
+        msg_mark_read(m["id"])
+        return {**state, "event_type": "agent_msg", "event_payload": m}
+
+    # 2. New leads awaiting first contact
+    leads = _leads_pending_contact()
+    if leads:
+        return {**state, "event_type": "new_lead", "event_payload": {"leads": leads}}
+
+    # 3. WhatsApp inbox
+    if wa_connected():
+        new_wpp: list[dict] = []
+        for jid in wa_active_jids(50):
+            new_wpp.extend(wa_fetch_new(jid, 30))
+        if new_wpp:
+            return {**state, "event_type": "whatsapp", "event_payload": {"messages": new_wpp}}
+
+    # 4. Gmail (if toggled on)
+    if gmail_enabled():
+        emails = [e for e in gmail_unread(5) if _email_important(e)]
+        if emails:
+            return {**state, "event_type": "gmail", "event_payload": {"emails": emails}}
+
+    # 5. Payment sheet check (fallback)
+    if SHEET_URL:
+        return {**state, "event_type": "sheet", "event_payload": {}}
+
+    return {**state, "event_type": "idle", "event_payload": {}}
+
+
+def _mgr_route(state: ManagerState) -> str:
+    et = state.get("event_type", "")
+    if et == "agent_msg":  return "handle_agent_msg"
+    if et == "new_lead":   return "handle_new_lead"
+    if et == "whatsapp":   return "handle_whatsapp"
+    if et == "gmail":      return "handle_gmail"
+    if et == "sheet":      return "handle_sheet"
+    return "handle_idle"
+
+def _mgr_idle(state: ManagerState) -> ManagerState:
+    log.debug("[Manager] idle cycle — nothing to process")
+    return {**state, "actions": []}
+
+
+# ── Manager: handle agent messages ───────────────────────
+
+def _mgr_agent_msg(state: ManagerState) -> ManagerState:
+    m      = state["event_payload"]
+    mtype  = m.get("message_type", "")
+    pl     = m.get("payload", {})
+    frm    = m.get("from_agent", "?")
+    acts   = []
+
+    if mtype == "heartbeat":
+        log.info(f"[Manager] ❤ heartbeat from {frm}")
+        return {**state, "actions": []}    # ← MUST return here, not append to acts
+
+    elif mtype == "oos_decision_request":
+        lead_id   = pl.get("lead_id", "")
+        post_text = pl.get("post", "")
+        decision  = call_llm(
+            [{"role": "user", "content": (
+                f"OOS post (lead {lead_id}):\n{post_text[:600]}\n\n"
+                "DECISION: APPROACH or DECISION: SKIP — one line reason."
+            )}],
+            system=MANAGER_SYS, max_tokens=80,
+        )
+        if decision and "APPROACH" in decision.upper():
+            db_exec("UPDATE oos_temp SET status='approach' WHERE lead_id=%s", (lead_id,))
+            msg_send("manager", frm, "oos_approved", {"lead_id": lead_id}, lead_id)
+            acts.append(f"oos_approved:{lead_id}")
+        else:
+            db_exec("UPDATE oos_temp SET status='skipped' WHERE lead_id=%s", (lead_id,))
+            acts.append(f"oos_skipped:{lead_id}")
+
+    elif mtype == "executor_report":
+        proj   = pl.get("project_id", "")
+        client = pl.get("client", "")
+        status = pl.get("status", "")
+        note   = pl.get("deploy_note", "")
+        ceo    = call_llm(
+            [{"role": "user", "content": (
+                f"Project {proj} | Client: {client} | Status: {status}\n"
+                f"Note: {note[:300]}\nDraft brief WhatsApp update for CEO."
+            )}],
+            system=MANAGER_SYS, max_tokens=200,
+        )
+        if ceo:
+            wa_send(CEO_WA, ceo)
+            acts.append(f"ceo_notified:project/{proj}")
+
+    elif mtype == "missing_info":
+        proj   = pl.get("project_id", "")
+        detail = pl.get("detail", "")
+        wa_send(CEO_WA,
+            f"⚠️ [{AGENCY}] Project *{proj}* is blocked.\n"
+            f"Missing:\n{detail[:300]}\n\nPlease provide details.")
+        acts.append(f"ceo_alerted:missing/{proj}")
+
+    elif mtype == "error_flag":
+        wa_send(CEO_WA, f"🚨 [{AGENCY}] Agent error:\n{pl.get('detail','')[:400]}")
+        acts.append("ceo_alerted:error")
+
+    elif mtype == "research_summary":
+        platform = pl.get("platform", "all")
+        n        = pl.get("items", 0)
+        summary  = pl.get("summary", "")
+        wa_send(CEO_WA,
+            f"📊 [{AGENCY}] Research — {platform} ({n} items):\n\n{summary[:1200]}")
+        acts.append(f"research_summary/{platform}")
+
+    elif mtype == "researcher_command":
+        # Manager receives researcher results forwarded back
+        log.info(f"[Manager] researcher_command echo from {frm}")
+
+    else:
+        log.warning(f"[Manager] unknown msg_type: {mtype}")
+
+    return {**state, "actions": acts}
+
+
+# ── Manager: handle new leads ─────────────────────────────
+
+def _leads_pending_contact() -> list[dict]:
+    rows = db_fetch(
+        """SELECT l.lead_id, l.name, l.platform, l.watcher_notes,
+                  l.whatsapp, wc.messages
+           FROM leads l
+           LEFT JOIN watcher_conversations wc ON l.lead_id=wc.lead_id
+           WHERE l.status='discovery_in_progress'
+             AND l.whatsapp IS NOT NULL
+             AND l.manager_contacted=false
+           ORDER BY l.created_at ASC LIMIT 10"""
+    )
+    out = []
+    for r in rows:
+        msgs = r[5] if isinstance(r[5], list) else json.loads(r[5] or "[]")
+        out.append({
+            "lead_id":  r[0], "name": r[1], "platform": r[2],
+            "notes":    r[3], "whatsapp": r[4], "conversation": msgs,
+        })
+    return out
+
+
+def _mgr_new_lead(state: ManagerState) -> ManagerState:
+    leads = state["event_payload"].get("leads", [])
+    acts  = []
+    for lead in leads:
+        lid  = lead["lead_id"]
+        name = lead["name"]
+        plat = lead["platform"]
+        wa   = lead.get("whatsapp", "")
+        if not wa:
+            continue
+        conv_text = "\n".join(
+            f"{m.get('role','?').upper()}: {m.get('text','')}"
+            for m in lead.get("conversation", [])[-5:]
+        )
+        first_msg = call_llm(
+            [{"role": "user", "content": (
+                f"Lead: {name} ({plat})\nNotes: {lead.get('notes','')[:400]}\n"
+                f"Conversation:\n{conv_text}\n\n"
+                "Write a warm, brief first WhatsApp intro for NoError agency. "
+                "Don't mention AI or bots."
+            )}],
+            system=MANAGER_SYS, max_tokens=300,
+        )
+        if first_msg and wa_send(wa, first_msg):
+            db_exec("UPDATE leads SET manager_contacted=true WHERE lead_id=%s", (lid,))
+            db_exec("UPDATE leads SET status='manager_in_contact', last_updated=NOW() WHERE lead_id=%s", (lid,))
+            wa_send(CEO_WA,
+                f"📥 [{AGENCY}] Lead contacted: *{name}* ({plat})\nID: {lid}")
+            acts.append(f"lead_contacted:{lid}")
+        else:
+            log.warning(f"[Manager] First msg failed for lead {lid}")
+    return {**state, "actions": acts}
+
+
+# ── Manager: handle WhatsApp ──────────────────────────────
+
+def _mgr_whatsapp(state: ManagerState) -> ManagerState:
+    messages = state["event_payload"].get("messages", [])
+    acts     = []
+    ceo_jid  = _jid(CEO_WA)
+
+    for msg in messages:
+        body   = msg.get("body", "").strip()
+        jid    = msg.get("jid", "")
+        msg_id = msg.get("id", "")
+        if not body or not jid:
+            continue
+
+        # Mark as processed FIRST to avoid reprocessing
+        if msg_id:
+            wa_set_last_id(jid, msg_id)
+
+        is_ceo = jid == ceo_jid
+        bl     = body.lower().strip()
+
+        if is_ceo:
+            if bl in ("gmail on", "gmail enable"):
+                setting_set("gmail_enabled", "true")
+                wa_send(CEO_WA, "✅ Gmail monitoring enabled.")
+                acts.append("gmail_on")
+
+            elif bl in ("gmail off", "gmail disable"):
+                setting_set("gmail_enabled", "false")
+                wa_send(CEO_WA, "🔕 Gmail monitoring disabled.")
+                acts.append("gmail_off")
+
+            elif any(kw in bl for kw in ("approve", "start project", "go ahead")):
+                rows = db_fetch(
+                    """SELECT project_id, executor_type FROM projects
+                       WHERE status='pending_ceo'
+                       ORDER BY created_at DESC LIMIT 1"""
+                )
+                if rows:
+                    pid, etype = rows[0]
+                    db_exec("UPDATE projects SET status='approved' WHERE project_id=%s", (pid,))
+                    db_notify("executor_channel", f"{etype}:{pid}")
+                    wa_send(CEO_WA, f"✅ Project *{pid}* approved & dispatched.")
+                    acts.append(f"project_approved:{pid}")
+                else:
+                    wa_send(CEO_WA, "No pending projects found.")
+
+            elif bl.startswith("research "):
+                query    = body[9:].strip()
+                platform = "all"
+                if " on " in query.lower():
+                    parts    = query.rsplit(" on ", 1)
+                    query    = parts[0].strip()
+                    platform = parts[1].strip().lower()
+                msg_send(
+                    "manager", "researcher", "researcher_command",
+                    {"query": query, "platform": platform},
+                )
+                wa_send(CEO_WA, f"🔍 Research started: *{query}* on {platform}")
+                acts.append(f"research_dispatched:{query[:40]}")
+
+            elif bl == "status":
+                _send_status_report()
+                acts.append("status_sent")
+
+            else:
+                reply = call_llm(
+                    [{"role": "user", "content": f"CEO says: {body}"}],
+                    system=MANAGER_SYS, max_tokens=150,
+                )
+                if reply:
+                    wa_send(CEO_WA, reply)
+                    acts.append(f"ceo_generic:{body[:50]}")
+
+        else:
+            # ── ANY incoming number — known lead or unknown ──
+            sender_number = jid.replace("@s.whatsapp.net", "")
+
+            # Try to find known lead
+            rows = db_fetch(
+                "SELECT lead_id, name FROM leads WHERE whatsapp=%s LIMIT 1",
+                (sender_number,),
+            )
+
+            if rows:
+                lid, client_name = rows[0]
+                # Fetch only last 6 messages as context (not full history)
+                conv_rows = db_fetch(
+                    "SELECT messages FROM watcher_conversations WHERE lead_id=%s", (lid,)
+                )
+                conv: list = []
+                if conv_rows:
+                    raw = conv_rows[0][0]
+                    conv = raw if isinstance(raw, list) else json.loads(raw or "[]")
+
+                # Build context from last 6 only
+                conv_text = "\n".join(
+                    f"{m.get('role','?').upper()}: {m.get('text','')}"
+                    for m in conv[-6:]
+                )
+                reply = call_llm(
+                    [{"role": "user", "content": (
+                        f"Client: {client_name}\n"
+                        f"Recent context (last 6 msgs):\n{conv_text}\n\n"
+                        f"New message from client: {body}\n\n"
+                        "Reply as agency manager. Be concise."
+                    )}],
+                    system=MANAGER_SYS, max_tokens=350,
+                )
+                if reply:
+                    wa_send(sender_number, reply)
+                    acts.append(f"client_replied:{client_name}")
+            else:
+                # Unknown number — reply anyway
+                log.info(f"[Manager] unknown number {sender_number} — replying generically")
+                reply = call_llm(
+                    [{"role": "user", "content": (
+                        f"Someone messaged our agency WhatsApp from an unknown number.\n"
+                        f"Their message: {body}\n\n"
+                        "Reply warmly as agency manager of NoError, introduce the agency briefly, "
+                        "and ask how you can help. Don't mention AI or bots."
+                    )}],
+                    system=MANAGER_SYS, max_tokens=300,
+                )
+                if reply:
+                    wa_send(sender_number, reply)
+                    acts.append(f"unknown_replied:{sender_number[:20]}")
+
+    return {**state, "actions": acts}
+
+
+# ── Manager: handle Gmail ─────────────────────────────────
+
+def _mgr_gmail(state: ManagerState) -> ManagerState:
+    emails = state["event_payload"].get("emails", [])
+    acts   = []
+    for em in emails:
+        sender  = em["sender"]
+        subject = em["subject"]
+        body    = em["body"]
+        reply   = call_llm(
+            [{"role": "user", "content": (
+                f"Email from {sender}\nSubject: {subject}\nBody: {body[:800]}\n\n"
+                "Draft a brief professional reply."
+            )}],
+            system=MANAGER_SYS, max_tokens=350,
+        )
+        if reply:
+            gmail_send(sender, f"Re: {subject}", reply)
+            acts.append(f"email_replied:{sender[:40]}")
+        if any(kw in subject.lower() for kw in ["payment", "invoice", "urgent", "contract"]):
+            wa_send(CEO_WA,
+                f"📧 [{AGENCY}] Important email:\nFrom: {sender}\n"
+                f"Subject: {subject}\n\n{body[:300]}")
+            acts.append(f"ceo_alerted_email:{subject[:40]}")
+    return {**state, "actions": acts}
+
+
+# ── Manager: handle sheet ─────────────────────────────────
+
+def _mgr_sheet(state: ManagerState) -> ManagerState:
+    acts = []
+    overdue = sheet_overdue()
+    if overdue:
+        lines = "\n".join(
+            f"• {r.get('client_name','?')} — {r.get('amount','?')} ({r.get('status','?')})"
+            for r in overdue[:5]
+        )
+        wa_send(CEO_WA, f"💰 [{AGENCY}] Payment Alert:\n\n{lines}")
+        acts.append(f"payment_alert:{len(overdue)}")
+    else:
+        log.info("[Manager] Sheet check: no overdue payments")
+    return {**state, "actions": acts}
+
+
+# ── Manager: status report ────────────────────────────────
+
+def _send_status_report() -> None:
+    leads_count = db_fetch("SELECT COUNT(*) FROM leads WHERE status='manager_in_contact'")
+    proj_count  = db_fetch("SELECT COUNT(*) FROM projects WHERE status='approved'")
+    errs_count  = db_fetch("SELECT COUNT(*) FROM agent_errors WHERE status='open'")
+    wa_send(CEO_WA,
+        f"📋 [{AGENCY}] Status Report\n"
+        f"• Active leads: {leads_count[0][0] if leads_count else 0}\n"
+        f"• Active projects: {proj_count[0][0] if proj_count else 0}\n"
+        f"• Open errors: {errs_count[0][0] if errs_count else 0}\n"
+        f"• Gmail: {'ON' if gmail_enabled() else 'OFF'}")
+
+
+# ── Manager: researcher health ────────────────────────────
+
+def check_researcher_health() -> None:
+    rows = db_fetch(
+        """SELECT created_at FROM agent_messages
+           WHERE to_agent='manager' AND message_type='heartbeat'
+             AND from_agent='researcher'
+           ORDER BY created_at DESC LIMIT 1"""
+    )
+    if not rows:
+        wa_send(CEO_WA,
+            f"⚠️ [{AGENCY}] Researcher never sent heartbeat. "
+            "Process may be down.")
+        return
+    last: datetime = rows[0][0]
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age_min = (datetime.now(timezone.utc) - last).total_seconds() / 60
+    if age_min > HB_TIMEOUT_MIN:
+        wa_send(CEO_WA,
+            f"⚠️ [{AGENCY}] Researcher silent — last heartbeat "
+            f"{int(age_min)} min ago. Please check.")
+    else:
+        log.info(f"[Manager] Researcher healthy ({age_min:.0f} min ago)")
+
+
+# ── Manager: graph ────────────────────────────────────────
+
+def _build_manager_graph() -> object:
+    g = StateGraph(ManagerState)
+    g.add_node("listen",           _mgr_listen)
+    g.add_node("handle_agent_msg", _mgr_agent_msg)
+    g.add_node("handle_new_lead",  _mgr_new_lead)
+    g.add_node("handle_whatsapp",  _mgr_whatsapp)
+    g.add_node("handle_gmail",     _mgr_gmail)
+    g.add_node("handle_sheet",     _mgr_sheet)
+    g.add_node("handle_idle",      _mgr_idle)
+    g.set_entry_point("listen")
+    g.add_conditional_edges("listen", _mgr_route, {
+        "handle_agent_msg": "handle_agent_msg",
+        "handle_new_lead":  "handle_new_lead",
+        "handle_whatsapp":  "handle_whatsapp",
+        "handle_gmail":     "handle_gmail",
+        "handle_sheet":     "handle_sheet",
+        "handle_idle":      "handle_idle",
+    })
+    for node in ["handle_agent_msg", "handle_new_lead",
+                 "handle_whatsapp", "handle_gmail",
+                 "handle_sheet", "handle_idle"]:
+        g.add_edge(node, END)
+    return g.compile()  # ← NO checkpointer
+
+
+# ── Manager: run loop ─────────────────────────────────────
+
+_mgr_graph = None
+_mgr_graph_lock = threading.Lock()
+
+
+def _mgr_graph_instance():
+    global _mgr_graph
+    if _mgr_graph is None:
+        with _mgr_graph_lock:
+            if _mgr_graph is None:
+                _mgr_graph = _build_manager_graph()
+    return _mgr_graph
+
+
+def run_manager_cycle() -> None:
+    cfg   = {"configurable": {"thread_id": "manager_v2"}}
+    state: ManagerState = {
+        "event_type": "", "event_payload": {},
+        "actions": [], "errors": [],
+    }
+    try:
+        result = _mgr_graph_instance().invoke(state, cfg)
+        if result and isinstance(result, dict) and result.get("actions"):
+            log.info(f"[Manager] actions: {result['actions']}")
+    except Exception as exc:
+        log.error(f"[Manager] cycle error: {exc}")
+        log_error("manager", "cycle_crash", str(exc))
+
+
+def manager_loop(stop: threading.Event) -> None:
+    log.info("[Manager] loop started")
+    while not stop.is_set():
+        try:
+            run_manager_cycle()
+        except Exception as exc:
+            log.error(f"[Manager] loop error: {exc}")
+        stop.wait(MANAGER_POLL_SEC)
+    log.info("[Manager] loop stopped")
+
+# ══════════════════════════════════════════════════════════
+# ── ANALYZER AGENT ───────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+
+class AnalyzerState(TypedDict):
+    task:    dict
+    result:  str
+    actions: Annotated[list[str], operator.add]
+    errors:  Annotated[list[str], operator.add]
+
+
+def _ana_pull_task(state: AnalyzerState) -> AnalyzerState:
+    msgs = msg_pull("analyzer")
+    if not msgs:
+        return {**state, "task": {}, "result": "idle"}
+    m = msgs[0]
+    msg_mark_read(m["id"])
+    return {**state, "task": m, "result": "pending"}
+
+
+def _ana_route(state: AnalyzerState) -> str:
+    mtype = state["task"].get("message_type", "")
+    if mtype == "oos_analysis_request":     return "classify_oos"
+    if mtype == "lead_qualification":       return "qualify_lead"
+    if mtype == "post_batch_classification": return "classify_batch"
+    return END
+
+
+def _ana_classify_oos(state: AnalyzerState) -> AnalyzerState:
+    pl       = state["task"].get("payload", {})
+    lead_id  = pl.get("lead_id", "")
+    platform = pl.get("platform", "")
+    post     = pl.get("post_content", "")
+    username = pl.get("username", "")
+    frm      = state["task"].get("from_agent", "watcher")
+
+    decision = call_llm(
+        [{"role": "user", "content": (
+            f"Platform: {platform} | User: {username}\n"
+            f"Post:\n{post[:800]}\n\n"
+            "Classify this post for a B2B AI automation agency.\n"
+            "Reply EXACTLY: ENGAGE, OOS, or SKIP — then one line reason."
+        )}],
+        system=ANALYZER_SYS, max_tokens=100,
+    )
+
+    if not decision:
+        log_error("analyzer", "llm_fail", f"OOS classification failed for {lead_id}")
+        return {**state, "actions": [f"llm_fail:{lead_id}"]}
+
+    d_upper = decision.upper()
+    if "ENGAGE" in d_upper:
+        db_exec("UPDATE oos_temp SET status='engage' WHERE lead_id=%s", (lead_id,))
+        msg_send("analyzer", "manager", "oos_decision_request",
+                 {"lead_id": lead_id, "post": post, "decision": "ENGAGE"}, lead_id)
+    elif "OOS" in d_upper:
+        db_exec("UPDATE oos_temp SET status='oos' WHERE lead_id=%s", (lead_id,))
+        msg_send("analyzer", "manager", "oos_decision_request",
+                 {"lead_id": lead_id, "post": post, "decision": "OOS"}, lead_id)
+    else:
+        db_exec("UPDATE oos_temp SET status='skipped' WHERE lead_id=%s", (lead_id,))
+
+    return {**state, "result": d_upper[:6], "actions": [f"classified:{lead_id}:{d_upper[:6]}"]}
+
+
+def _ana_qualify_lead(state: AnalyzerState) -> AnalyzerState:
+    pl      = state["task"].get("payload", {})
+    lead_id = pl.get("lead_id", "")
+    notes   = pl.get("watcher_notes", "")
+    conv    = pl.get("conversation", "")
+
+    score = call_llm(
+        [{"role": "user", "content": (
+            f"Lead qualification:\nNotes: {notes[:600]}\nConversation:\n{conv[:600]}\n\n"
+            "Score 1-10 (10=high value). Reply: SCORE: <n> | REASON: <one line>"
+        )}],
+        system=ANALYZER_SYS, max_tokens=80,
+    )
+
+    if score:
+        msg_send("analyzer", "manager", "lead_score",
+                 {"lead_id": lead_id, "score": score}, lead_id)
+    return {**state, "actions": [f"qualified:{lead_id}"]}
+
+
+def _ana_classify_batch(state: AnalyzerState) -> AnalyzerState:
+    pl    = state["task"].get("payload", {})
+    posts = pl.get("posts", [])
+    acts  = []
+    for post in posts[:20]:  # safety cap
+        pid     = post.get("id", "")
+        content = post.get("content", "")
+        result  = call_llm(
+            [{"role": "user", "content": (
+                f"Post:\n{content[:500]}\n\n"
+                "ENGAGE, OOS, or SKIP for B2B AI agency?"
+            )}],
+            system=ANALYZER_SYS, max_tokens=30, temperature=0.3,
+        )
+        if result:
+            db_exec(
+                "INSERT INTO oos_temp (lead_id, post_content, status) "
+                "VALUES (%s,%s,%s) ON CONFLICT (lead_id) DO UPDATE SET status=EXCLUDED.status",
+                (pid, content[:2000], result.upper()[:6]),
+            )
+            acts.append(f"batch:{pid}:{result[:6]}")
+    return {**state, "actions": acts}
+
+
+def _build_analyzer_graph() -> object:
+    g = StateGraph(AnalyzerState)
+    g.add_node("pull_task",          _ana_pull_task)
+    g.add_node("classify_oos",       _ana_classify_oos)
+    g.add_node("qualify_lead",       _ana_qualify_lead)
+    g.add_node("classify_batch",     _ana_classify_batch)
+    g.set_entry_point("pull_task")
+    g.add_conditional_edges("pull_task", _ana_route, {
+        "classify_oos":   "classify_oos",
+        "qualify_lead":   "qualify_lead",
+        "classify_batch": "classify_batch",
+        END: END,
+    })
+    for node in ["classify_oos", "qualify_lead", "classify_batch"]:
+        g.add_edge(node, END)
+    return g.compile(checkpointer=_checkpointer())
+
+
+_ana_graph = None
+_ana_graph_lock = threading.Lock()
+
+
+def _ana_graph_instance():
+    global _ana_graph
+    if _ana_graph is None:
+        with _ana_graph_lock:
+            if _ana_graph is None:
+                _ana_graph = _build_analyzer_graph()
+    return _ana_graph
+
+
+def run_analyzer_cycle() -> None:
+    cfg   = {"configurable": {"thread_id": "analyzer_v2"}} 
+    state: AnalyzerState = {"task": {}, "result": "", "actions": [], "errors": []}
+    try:
+        result = _ana_graph_instance().invoke(state, cfg)
+        if result.get("actions"):
+            log.info(f"[Analyzer] actions: {result['actions']}")
+    except Exception as exc:
+        log.error(f"[Analyzer] cycle error: {exc}")
+        log_error("analyzer", "cycle_crash", str(exc))
+
+
+def analyzer_loop(stop: threading.Event) -> None:
+    log.info("[Analyzer] loop started")
+    while not stop.is_set():
+        try:
+            run_analyzer_cycle()
+        except Exception as exc:
+            log.error(f"[Analyzer] loop error: {exc}")
+        stop.wait(ANALYZER_POLL_SEC)
+    log.info("[Analyzer] loop stopped")
+
+# ══════════════════════════════════════════════════════════
+# ── RESEARCHER AGENT ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+
+# ── Platform modules ──────────────────────────────────────
+
+def _research_google(query: str, limit: int = 10) -> list[dict]:
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; NoErrorBot/1.0)"}
+        r = requests.get(
+            "https://www.google.com/search",
+            params={"q": query, "num": limit},
+            headers=headers, timeout=15,
+        )
+        from bs4 import BeautifulSoup
+        soup    = BeautifulSoup(r.text, "html.parser")
+        results = []
+        for g in soup.select("div.g")[:limit]:
+            title_el = g.select_one("h3")
+            link_el  = g.select_one("a")
+            desc_el  = g.select_one(".VwiC3b, .s3v9rd")
+            title    = title_el.get_text() if title_el else ""
+            link     = link_el["href"] if link_el and link_el.get("href") else ""
+            desc     = desc_el.get_text() if desc_el else ""
+            if title:
+                results.append({"title": title, "url": link, "snippet": desc})
+        return results
+    except Exception as exc:
+        log.error(f"[Researcher] Google error: {exc}")
+        return []
+
+
+def _research_reddit(query: str, limit: int = 10) -> list[dict]:
+    try:
+        headers = {"User-Agent": "NoErrorResearcher/1.0"}
+        r = requests.get(
+            "https://www.reddit.com/search.json",
+            params={"q": query, "limit": limit, "sort": "relevance"},
+            headers=headers, timeout=15,
+        )
+        r.raise_for_status()
+        posts   = r.json().get("data", {}).get("children", [])
+        results = []
+        for p in posts:
+            d = p.get("data", {})
+            results.append({
+                "title":     d.get("title", ""),
+                "url":       f"https://reddit.com{d.get('permalink', '')}",
+                "subreddit": d.get("subreddit", ""),
+                "score":     d.get("score", 0),
+                "selftext":  d.get("selftext", "")[:500],
+            })
+        return results
+    except Exception as exc:
+        log.error(f"[Researcher] Reddit error: {exc}")
+        return []
+
+
+def _research_youtube(query: str, limit: int = 5) -> list[dict]:
+    yt_key = os.environ.get("YOUTUBE_API_KEY", "")
+    if not yt_key:
+        log.warning("[Researcher] YOUTUBE_API_KEY not set — skipping YouTube")
+        return []
+    try:
+        r = requests.get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params={
+                "part": "snippet", "q": query,
+                "maxResults": limit, "type": "video", "key": yt_key,
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        return [
+            {
+                "title":       i["snippet"]["title"],
+                "url":         f"https://youtube.com/watch?v={i['id']['videoId']}",
+                "description": i["snippet"]["description"][:300],
+                "channel":     i["snippet"]["channelTitle"],
+            }
+            for i in items
+        ]
+    except Exception as exc:
+        log.error(f"[Researcher] YouTube error: {exc}")
+        return []
+
+
+def _research_twitter(query: str, limit: int = 10) -> list[dict]:
+    """Uses Twitter API v2 bearer token if available."""
+    bearer = os.environ.get("TWITTER_BEARER_TOKEN", "")
+    if not bearer:
+        log.warning("[Researcher] TWITTER_BEARER_TOKEN not set — skipping Twitter")
+        return []
+    try:
+        r = requests.get(
+            "https://api.twitter.com/2/tweets/search/recent",
+            params={
+                "query": query, "max_results": min(limit, 100),
+                "tweet.fields": "author_id,created_at,text",
+            },
+            headers={"Authorization": f"Bearer {bearer}"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        tweets = r.json().get("data", [])
+        return [
+            {"text": t.get("text", ""), "id": t.get("id", ""),
+             "created_at": t.get("created_at", "")}
+            for t in tweets
+        ]
+    except Exception as exc:
+        log.error(f"[Researcher] Twitter error: {exc}")
+        return []
+
+
+def _research_facebook(query: str, limit: int = 10) -> list[dict]:
+    """Uses Facebook Graph API if page token available."""
+    fb_token = os.environ.get("FACEBOOK_PAGE_TOKEN", "")
+    if not fb_token:
+        log.warning("[Researcher] FACEBOOK_PAGE_TOKEN not set — skipping Facebook")
+        return []
+    try:
+        r = requests.get(
+            "https://graph.facebook.com/v18.0/search",
+            params={"q": query, "type": "post", "access_token": fb_token, "limit": limit},
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = r.json().get("data", [])
+        return [
+            {"message": i.get("message", "")[:500], "id": i.get("id", "")}
+            for i in items
+        ]
+    except Exception as exc:
+        log.error(f"[Researcher] Facebook error: {exc}")
+        return []
+
+
+_PLATFORM_FNS = {
+    "google":   _research_google,
+    "reddit":   _research_reddit,
+    "youtube":  _research_youtube,
+    "twitter":  _research_twitter,
+    "facebook": _research_facebook,
+}
+
+
+# ── Researcher: LangGraph state ───────────────────────────
+
+class ResearcherState(TypedDict):
+    command:   dict
+    results:   dict
+    summary:   str
+    actions:   Annotated[list[str], operator.add]
+    errors:    Annotated[list[str], operator.add]
+
+
+def _res_pull_command(state: ResearcherState) -> ResearcherState:
+    msgs = msg_pull("researcher")
+    if not msgs:
+        return {**state, "command": {}, "results": {}, "summary": ""}
+    m = msgs[0]
+    msg_mark_read(m["id"])
+    return {**state, "command": m}
+
+
+def _res_route(state: ResearcherState) -> str:
+    pl = state["command"].get("payload", {})
+    if pl.get("query"):
+        return "execute_research"
+    return END
+
+
+def _res_execute(state: ResearcherState) -> ResearcherState:
+    pl       = state["command"].get("payload", {})
+    query    = pl.get("query", "")
+    platform = pl.get("platform", "all").lower()
+    results  = {}
+
+    platforms = (
+        list(_PLATFORM_FNS.keys()) if platform == "all"
+        else [p.strip() for p in platform.split(",") if p.strip() in _PLATFORM_FNS]
+    )
+
+    for plat in platforms:
+        log.info(f"[Researcher] researching '{query}' on {plat}")
+        results[plat] = _PLATFORM_FNS[plat](query)
+
+    return {**state, "results": results}
+
+
+def _res_summarize(state: ResearcherState) -> ResearcherState:
+    results = state["results"]
+    pl      = state["command"].get("payload", {})
+    query   = pl.get("query", "")
+
+    all_items = []
+    for plat, items in results.items():
+        for item in items:
+            title   = item.get("title") or item.get("text", "")[:80] or item.get("message", "")[:80]
+            snippet = item.get("snippet") or item.get("selftext", "")[:200] or ""
+            all_items.append(f"[{plat.upper()}] {title}: {snippet}")
+
+    if not all_items:
+        return {**state, "summary": "No results found.", "actions": [f"research_empty:{query[:40]}"]}
+
+    combined = "\n".join(all_items[:40])
+    summary  = call_llm(
+        [{"role": "user", "content": (
+            f"Research query: {query}\n\nResults:\n{combined}\n\n"
+            "Summarize key findings, leads, and opportunities for a B2B AI agency. "
+            "Max 300 words."
+        )}],
+        system=RESEARCHER_SYS, max_tokens=400,
+    )
+
+    n_items = sum(len(v) for v in results.values())
+    platform = pl.get("platform", "all")
+
+    # Store results in DB
+    db_exec(
+        """INSERT INTO researcher_results (platform, query, results, summary)
+           VALUES (%s,%s,%s,%s)""",
+        (platform, query, json.dumps(results), summary or ""),
+    )
+
+    # Forward to Manager
+    msg_send("researcher", "manager", "research_summary", {
+        "query":    query,
+        "platform": platform,
+        "items":    n_items,
+        "summary":  summary or "No summary generated.",
+    })
+
+    return {**state, "summary": summary or "", "actions": [f"research_done:{query[:40]}"]}
+
+
+def _build_researcher_graph() -> object:
+    g = StateGraph(ResearcherState)
+    g.add_node("pull_command",      _res_pull_command)
+    g.add_node("execute_research",  _res_execute)
+    g.add_node("summarize_results", _res_summarize)
+    g.set_entry_point("pull_command")
+    g.add_conditional_edges("pull_command", _res_route, {
+        "execute_research": "execute_research",
+        END: END,
+    })
+    g.add_edge("execute_research",  "summarize_results")
+    g.add_edge("summarize_results", END)
+    return g.compile(checkpointer=_checkpointer())
+
+
+_res_graph = None
+_res_graph_lock = threading.Lock()
+
+
+def _res_graph_instance():
+    global _res_graph
+    if _res_graph is None:
+        with _res_graph_lock:
+            if _res_graph is None:
+                _res_graph = _build_researcher_graph()
+    return _res_graph
+
+
+def run_researcher_cycle() -> None:
+    cfg   = {"configurable": {"thread_id": "researcher_v2"}}
+    state: ResearcherState = {
+        "command": {}, "results": {}, "summary": "",
+        "actions": [], "errors": [],
+    }
+    try:
+        result = _res_graph_instance().invoke(state, cfg)
+        if result.get("actions"):
+            log.info(f"[Researcher] actions: {result['actions']}")
+    except Exception as exc:
+        log.error(f"[Researcher] cycle error: {exc}")
+        log_error("researcher", "cycle_crash", str(exc))
+
+
+def _researcher_send_heartbeat() -> None:
+    msg_send("researcher", "manager", "heartbeat",
+             {"ts": datetime.now(timezone.utc).isoformat()})
+    log.info("[Researcher] ❤ heartbeat sent")
+
+
+def researcher_loop(stop: threading.Event) -> None:
+    log.info("[Researcher] loop started")
+    last_hb = 0.0
+    while not stop.is_set():
+        try:
+            run_researcher_cycle()
+            # Heartbeat every 30 min
+            if time.time() - last_hb > RESEARCHER_HB_INTERVAL:
+                _researcher_send_heartbeat()
+                last_hb = time.time()
+        except Exception as exc:
+            log.error(f"[Researcher] loop error: {exc}")
+        stop.wait(RESEARCHER_POLL_SEC)
+    log.info("[Researcher] loop stopped")
+
+# ══════════════════════════════════════════════════════════
+# NOTIFY LISTENER  (PG LISTEN/NOTIFY — event-driven trigger)
+# ══════════════════════════════════════════════════════════
+
+_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="noerror")
+
+
+def _make_notify_conn() -> psycopg2.extensions.connection:
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    with conn.cursor() as cur:
+        cur.execute("LISTEN agent_channel")
+        cur.execute("LISTEN oos_channel")
+        cur.execute("LISTEN executor_channel")
+    return conn
+
+
+def notify_listener(stop: threading.Event) -> None:
+    log.info("[Notify] listener started")
+    conn    = None
+    backoff = 5
+
+    while not stop.is_set():
+        try:
+            if conn is None:
+                conn    = _make_notify_conn()
+                backoff = 5
+                log.info("[Notify] connected")
+
+            r, _, _ = select.select([conn], [], [], 60)
+            if not r:
+                with conn.cursor() as ka:
+                    ka.execute("SELECT 1")
+                continue
+
+            conn.poll()
+            while conn.notifies:
+                n = conn.notifies.pop(0)
+                channel = n.channel
+                payload = n.payload.strip()
+                log.info(f"[Notify] {channel}: '{payload}'")
+
+                if channel == "agent_channel":
+                    if payload == "manager":
+                        _executor.submit(run_manager_cycle)
+                    elif payload == "analyzer":
+                        _executor.submit(run_analyzer_cycle)
+                    elif payload == "researcher":
+                        _executor.submit(run_researcher_cycle)
+
+                elif channel == "oos_channel":
+                    _executor.submit(run_analyzer_cycle)
+
+        except Exception as exc:
+            log.error(f"[Notify] error: {exc} — reconnecting in {backoff}s")
+            try:
+                if conn:
+                    conn.close()
+            except Exception:
+                pass
+            conn = None
+            stop.wait(backoff)
+            backoff = min(backoff * 2, 120)
+
+    log.info("[Notify] listener stopped")
+
+# ══════════════════════════════════════════════════════════
+# WEBHOOK SERVER  (Evolution / OpenClaw WhatsApp events)
+# ══════════════════════════════════════════════════════════
+
+webhook = FastAPI(title="NoError Webhook")
+
+
+@webhook.post("/webhook/whatsapp")
+async def wh_whatsapp(request: Request):
+    try:
+        data  = await request.json()
+        event = data.get("event", "")
+        if event in ("messages.upsert", "message.received"):
+            from_me = data.get("data", {}).get("key", {}).get("fromMe", True)
+            if not from_me:
+                db_notify("agent_channel", "manager")
+                log.info("[Webhook] WA incoming → manager notified")
+        return {"status": "ok"}
+    except Exception as exc:
+        log.error(f"[Webhook] error: {exc}")
+        return {"status": "error", "detail": str(exc)}
+
+
+@webhook.post("/webhook/agent")
+async def wh_agent(request: Request):
+    """Internal endpoint: any agent can POST to trigger a cycle."""
+    try:
+        data  = await request.json()
+        agent = data.get("agent", "")
+        if agent in ("manager", "analyzer", "researcher"):
+            db_notify("agent_channel", agent)
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+@webhook.get("/health")
+async def health():
+    return {
+        "status":    "ok",
+        "ts":        datetime.utcnow().isoformat(),
+        "wa":        wa_connected(),
+        "gmail":     gmail_enabled(),
+    }
+
+
+def start_webhook(stop: threading.Event) -> None:
+    config = uvicorn.Config(
+        webhook, host="0.0.0.0", port=8000,
+        log_level="warning", loop="asyncio",
+    )
+    server = uvicorn.Server(config)
+
+    def _run():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server.serve())
+
+    t = threading.Thread(target=_run, daemon=True, name="webhook")
+    t.start()
+
+    # Monitor stop event to shut uvicorn down
+    def _watch():
+        stop.wait()
+        server.should_exit = True
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+# ══════════════════════════════════════════════════════════
+# STARTUP
+# ══════════════════════════════════════════════════════════
+
+def send_startup_message() -> None:
+    if flag_get("startup_msg_sent"):
+        log.info("[Startup] already sent — skipping")
+        return
+    log.info("[Startup] waiting for WhatsApp connection…")
+    for _ in range(24):
+        if wa_connected():
+            break
+        time.sleep(5)
+    if not wa_connected():
+        log.warning("[Startup] WA not connected after 120s")
+        return
+    text = (
+        f"✅ *{AGENCY} Manager Online*\n\n"
+        "All systems active.\n\n"
+        "*Commands:*\n"
+        "• `gmail on` / `gmail off`\n"
+        "• `approve` — approve pending project\n"
+        "• `status` — system status report\n"
+        "• `research <query> on <platform>` — start research\n\n"
+        "Monitoring: leads, projects, payments, Gmail. 🚀"
+    )
+    if wa_send(CEO_WA, text):
+        flag_set("startup_msg_sent")
+        log.info("[Startup] message sent ✓")
+    else:
+        log.warning("[Startup] send failed")
+
+
+def _validate_env() -> None:
+    required = [
+        "OPENAI_API_KEY", "DATABASE_URL", "CEO_WHATSAPP_NUMBER",
+        "GMAIL_USER", "GMAIL_APP_PASSWORD", "GOOGLE_SHEET_URL",
+        "EVOLUTION_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE",
+    ]
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
+        raise EnvironmentError(f"Missing env vars: {', '.join(missing)}")
+    log.info("[Core] Env validated ✓")
+
+# ══════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════
+
+def main() -> None:
+    log.info("══════════════════════════════════════")
+    log.info(f"  {AGENCY} — Core (Manager·Analyzer·Researcher)")
+    log.info("══════════════════════════════════════")
+
+    _validate_env()
+    setup_schema()
+
+    stop = threading.Event()
+
+    # ── Graceful shutdown ────────────────────────────────
+    def _shutdown(sig, _frame):
+        log.info(f"[Core] signal {sig} — shutting down…")
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT,  _shutdown)
+
+    # ── Start webhook (Evolution WA bridge must POST here)
+    start_webhook(stop)
+    time.sleep(1)
+
+    # ── Startup WA message (once per DB lifecycle)
+    threading.Thread(
+        target=send_startup_message, daemon=True, name="startup"
+    ).start()
+
+    # ── NOTIFY listener (primary event trigger)
+    threading.Thread(
+        target=notify_listener, args=(stop,), daemon=True, name="notify"
+    ).start()
+
+    # ── Agent loops
+    threading.Thread(
+        target=manager_loop, args=(stop,), daemon=True, name="manager"
+    ).start()
+    threading.Thread(
+        target=analyzer_loop, args=(stop,), daemon=True, name="analyzer"
+    ).start()
+    threading.Thread(
+        target=researcher_loop, args=(stop,), daemon=True, name="researcher"
+    ).start()
+
+    # ── Scheduled jobs
+    schedule.every(30).minutes.do(
+        lambda: _executor.submit(check_researcher_health)
+    )
+    schedule.every().day.at("09:00").do(
+        lambda: _executor.submit(run_manager_cycle)
+    )
+
+    log.info(f"[Core] All systems running ✅  Gmail={'ON' if gmail_enabled() else 'OFF'}")
+
+    while not stop.is_set():
+        schedule.run_pending()
+        time.sleep(30)
+
+    log.info("[Core] Shutdown complete.")
+    _executor.shutdown(wait=False)
+
+
+if __name__ == "__main__":
+    main()
