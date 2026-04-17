@@ -3,5 +3,4 @@ psycopg2-binary
 requests
 schedule
 playwright
-playwright-stealth
 langgraph
